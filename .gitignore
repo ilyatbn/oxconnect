@@ -1,0 +1,6 @@
+node_modules/
+scripts/
+.DS_Store
+
+# (investigation scripts, trace logs, and the live browser profile all live in
+#  scripts/ and contain captured tokens/session — kept out of version control)

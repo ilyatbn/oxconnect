@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    :root { color-scheme: light dark; }
+    body { font: 13px/1.4 -apple-system, system-ui, sans-serif; width: 340px; margin: 0; padding: 10px; }
+
+    .topbar { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; }
+    .topbar h1 { font-size: 13px; margin: 0; flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; }
+    .topbar h1 .dot { width: 8px; height: 8px; border-radius: 50%; background: #c74634; flex: none; }
+    .gear { border: none; background: none; cursor: pointer; font-size: 16px; padding: 2px 4px; color: inherit; line-height: 1; }
+    .gear:hover { color: #c74634; }
+    .back { border: 1px solid #8884; border-radius: 6px; background: #80808014; cursor: pointer; font: inherit; padding: 2px 9px; line-height: 1.3; color: inherit; }
+    .back:hover { border-color: #c74634; }
+
+    .empty { color: #888; font-size: 12px; padding: 10px 2px; }
+
+    .card { border: 1px solid #8883; border-radius: 8px; padding: 8px; margin-bottom: 8px; }
+    .card .head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+    .card .title { font-weight: 600; flex: 1; min-width: 0; }
+    .card .title small { display: block; font-weight: 400; color: #888; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .iconbtn { border: 1px solid #8884; border-radius: 6px; background: #80808014; cursor: pointer; font: inherit; padding: 3px 7px; line-height: 1; }
+    .iconbtn:hover { border-color: #c74634; }
+
+    button.switch {
+      display: flex; justify-content: space-between; align-items: center; width: 100%;
+      text-align: left; padding: 7px 9px; margin: 3px 0; border: 1px solid #8884; border-radius: 6px;
+      background: #80808014; cursor: pointer; font: inherit;
+    }
+    button.switch:hover { background: #c746341a; border-color: #c74634; }
+    button.switch.active { border-color: #2e7d32aa; background: #2e7d3214; }
+    button.switch.warn { border-color: #c9a100; background: #c9a1001f; }
+    .badge.warn { background: #c9a100; color: #1a1a1a; }
+    button.switch .meta { font-size: 11px; color: #888; }
+    .badge { font-size: 9px; padding: 1px 5px; border-radius: 8px; background: #8883; margin-left: 4px; }
+    .badge.live { background: #2e7d32; color: #fff; }
+    .stamp { font-size: 10px; color: #999; margin-top: 4px; }
+
+    .addbox input { width: 100%; box-sizing: border-box; padding: 6px 8px; margin: 0 0 6px; border: 1px solid #8884; border-radius: 6px; background: transparent; color: inherit; font: inherit; }
+    .addbox button { width: 100%; padding: 7px; border: 1px solid #8884; border-radius: 6px; background: #c746341a; cursor: pointer; font: inherit; font-weight: 600; }
+    .addbox button:hover { border-color: #c74634; }
+
+    .plusbar { display: flex; justify-content: center; padding: 8px 0 2px; }
+    .plus {
+      width: 36px; height: 36px; border-radius: 50%; border: 1px solid #8884;
+      background: #c746341a; color: inherit; font-size: 20px; line-height: 1;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+    }
+    .plus:hover { border-color: #c74634; background: #c7463430; }
+
+    .setting { padding: 9px 2px; border-bottom: 1px solid #8882; }
+    .setting label.row { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+    .setting .label { flex: 1; }
+    .setting .desc { font-size: 11px; color: #888; margin-top: 2px; }
+    .setting .soon { font-size: 9px; padding: 1px 5px; border-radius: 8px; background: #8883; margin-left: 4px; }
+    .setting button { padding: 7px 10px; border: 1px solid #8884; border-radius: 6px; background: #80808014; cursor: pointer; font: inherit; }
+    .setting button:hover { border-color: #c74634; }
+    .setting select { margin-top: 6px; width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #8884; border-radius: 6px; background: transparent; color: inherit; font: inherit; }
+    .kastatus { font-size: 11px; color: #888; margin-top: 6px; white-space: pre-wrap; }
+    .kastatus .ok { color: #2e7d32; } .kastatus .fail { color: #b8920a; }
+    .kacheck { margin-top: 6px; padding: 5px 9px; border: 1px solid #8884; border-radius: 6px; background: #80808014; cursor: pointer; font: inherit; }
+    .kacheck:hover { border-color: #c74634; }
+    .cookielist { font-size: 10px; color: #999; margin-top: 4px; word-break: break-all; }
+    /* iOS-style switch */
+    .sw { position: relative; width: 34px; height: 20px; flex: none; }
+    .sw input { opacity: 0; width: 0; height: 0; }
+    .sw .track { position: absolute; inset: 0; background: #8886; border-radius: 20px; transition: .15s; }
+    .sw .track::before { content: ""; position: absolute; height: 16px; width: 16px; left: 2px; top: 2px; background: #fff; border-radius: 50%; transition: .15s; }
+    .sw input:checked + .track { background: #c74634; }
+    .sw input:checked + .track::before { transform: translateX(14px); }
+
+    #status, #settingsStatus, #addStatus { font-size: 11px; color: #888; min-height: 14px; margin-top: 8px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <!-- ===== Main view ===== -->
+  <div id="mainView">
+    <div class="topbar">
+      <h1><span class="dot"></span> oxconnect</h1>
+      <button id="gear" class="gear" title="Settings">⚙</button>
+    </div>
+    <div id="list"></div>
+    <div class="plusbar">
+      <button id="plus" class="plus" title="Add account">+</button>
+    </div>
+    <div id="status"></div>
+  </div>
+
+  <!-- ===== Add-account view ===== -->
+  <div id="addView" hidden>
+    <div class="topbar">
+      <button id="addBack" class="back" title="Back">←</button>
+      <h1>Add account</h1>
+    </div>
+    <div class="addbox">
+      <input id="newTenant" placeholder="account name (e.g. my-oracle-cloud)" />
+      <input id="newLabel" placeholder="label (optional)" />
+      <button id="add">Add account</button>
+    </div>
+    <div id="addStatus"></div>
+  </div>
+
+  <!-- ===== Settings view ===== -->
+  <div id="settingsView" hidden>
+    <div class="topbar">
+      <button id="back" class="back" title="Back">←</button>
+      <h1>Settings</h1>
+    </div>
+
+    <div class="setting">
+      <div class="label">Discovery region
+        <div class="desc">Which regional endpoint to query when adding/refreshing accounts. Any region resolves a tenant's real home region — default is fine for most.</div>
+      </div>
+      <select id="optRegion"></select>
+    </div>
+
+    <div class="setting">
+      <label class="row">
+        <span class="label">Open switches in a new tab
+          <div class="desc">Otherwise the active tab is reused.</div>
+        </span>
+        <span class="sw"><input type="checkbox" id="optNewTab" /><span class="track"></span></span>
+      </label>
+    </div>
+
+    <div class="setting">
+      <label class="row">
+        <span class="label">Keep-Alive
+          <div class="desc">Every minute, pings the active tenant's profile endpoint to keep its session cookies fresh. Backs off on failure and marks the profile yellow.</div>
+        </span>
+        <span class="sw"><input type="checkbox" id="optKeepAlive" /><span class="track"></span></span>
+      </label>
+      <div id="kaStatus" class="kastatus"></div>
+      <div id="kaCookies" class="cookielist"></div>
+      <button id="kaCheck" class="kacheck" hidden>Check now</button>
+    </div>
+
+    <div class="setting" style="border-bottom:none;">
+      <button id="clear" title="Sign out of OCI in this browser">Clear OCI session</button>
+      <div class="desc">Clears Oracle cookies + SPA storage (keeps your corporate IdP). Resets the active tenant.</div>
+    </div>
+
+    <div id="settingsStatus"></div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
