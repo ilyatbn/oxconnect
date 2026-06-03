@@ -1,47 +1,48 @@
 // oxconnect content script — runs on idcs-*.identity.oraclecloud.com/ui/v1/signin
 //
-// For SAML/SSO-only identity domains the signin page typically shows a single
-// federated "Sign in with <IdP>" button. If autoClickSso is enabled and exactly
-// one obvious federated button is found, click it to reach genuine one-click
-// switching. Conservative by design — it will NOT click if there's ambiguity
-// (e.g. a visible username/password form), to avoid misfires.
+// The IDCS sign-in page renders a federated-IdP ("company SSO") button list as
+// Oracle JET <oj-button> elements inside #idcs-signin-idp-signin-form, e.g.:
+//   <oj-button id="idcs-signin-idp-signin-form-idp-button-<NAME>" title="<NAME>"
+//              on-oj-action="[[companySubmit]]"> <button class="oj-button-button">…
 //
-// NOTE: the exact button selector/text varies per IdP. This logs its candidates
-// to the console (filter by "oxconnect") so you can tune SSO_TEXT / selectors to
-// your tenant's actual signin page.
+// If autoClickSso is enabled and there is exactly ONE such IdP button, click it to
+// finish login in one click. If there are several (multiple IdPs), we don't guess —
+// we log the candidates so a preference can be added later. The list renders async
+// (knockout), so we poll briefly.
 
 (async () => {
   const { settings } = await chrome.storage.local.get('settings');
-  if (settings && settings.autoClickSso === false) return;
+  if (!settings || settings.autoClickSso === false) return;
 
-  const SSO_TEXT = /sign in with|single sign|use your (single )?sign|company|corporate|federat|\bsso\b|\bsaml\b|continue with|sign in using/i;
-  const SELECTOR = 'a, button, [role="button"], .idp, .idp-btn, .social-link, [data-idp], [data-automation-id*="idp" i]';
+  const FORM = '#idcs-signin-idp-signin-form';
+  const IDP_BUTTON = 'oj-button[id^="idcs-signin-idp-signin-form-idp-button-"]';
 
-  function hasVisiblePasswordField() {
-    return [...document.querySelectorAll('input[type="password"]')].some((i) => i.offsetParent !== null);
+  const visible = (el) => el && el.offsetParent !== null;
+  const nameOf = (el) => el.getAttribute('title') || el.id.replace('idcs-signin-idp-signin-form-idp-button-', '');
+
+  function idpButtons() {
+    const scope = document.querySelector(FORM) || document;
+    return [...scope.querySelectorAll(IDP_BUTTON)].filter(visible);
   }
 
-  function findSsoButton() {
-    const cands = [...document.querySelectorAll(SELECTOR)].filter((el) => {
-      if (el.offsetParent === null) return false; // not visible
-      const text = (el.innerText || el.textContent || el.value || '').trim();
-      return SSO_TEXT.test(text);
-    });
-    return cands;
+  function clickIdp(ojButton) {
+    // The native <button> inside the oj-button triggers its on-oj-action handler.
+    const inner = ojButton.querySelector('button.oj-button-button') || ojButton;
+    inner.click();
   }
 
-  let clicked = false;
+  let done = false;
   let ticks = 0;
   const timer = setInterval(() => {
-    if (clicked || ++ticks > 20) { clearInterval(timer); return; } // give up after ~10s
-    const cands = findSsoButton();
-    if (cands.length) console.debug('oxconnect: SSO button candidates:', cands.map((e) => (e.innerText || e.textContent || '').trim()));
-    // Only auto-click when unambiguous: exactly one match and no password form to fill.
-    if (cands.length === 1 && !hasVisiblePasswordField()) {
-      clicked = true;
-      clearInterval(timer);
-      console.debug('oxconnect: auto-clicking SSO button:', (cands[0].innerText || cands[0].textContent || '').trim());
-      cands[0].click();
+    if (done || ++ticks > 30) { clearInterval(timer); return; } // give up after ~15s
+    const btns = idpButtons();
+    if (!btns.length) return; // not rendered yet
+    if (btns.length > 1) {
+      console.debug('oxconnect: multiple SSO/IdP buttons — not auto-clicking:', btns.map(nameOf));
+      done = true; clearInterval(timer); return;
     }
+    done = true; clearInterval(timer);
+    console.debug('oxconnect: auto-clicking SSO/IdP button:', nameOf(btns[0]));
+    clickIdp(btns[0]);
   }, 500);
 })();

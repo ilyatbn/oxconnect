@@ -235,6 +235,7 @@ $('#addBack').addEventListener('click', () => { addStatus(''); showView('#mainVi
 
 // settings toggles
 $('#optNewTab').addEventListener('change', (e) => saveSetting('openInNewTab', e.target.checked));
+$('#optAutoSso').addEventListener('change', (e) => saveSetting('autoClickSso', e.target.checked));
 $('#optRegion').addEventListener('change', (e) => saveSetting('discoveryRegion', e.target.value));
 $('#optKeepAlive').addEventListener('change', async (e) => {
   await saveSetting('keepAlive', e.target.checked);
@@ -259,6 +260,7 @@ $('#clear').addEventListener('click', async () => {
 (async function init() {
   const s = await loadSettings();
   $('#optNewTab').checked = s.openInNewTab;
+  $('#optAutoSso').checked = s.autoClickSso;
   $('#optKeepAlive').checked = s.keepAlive;
   populateRegions(s.discoveryRegion);
   renderKeepAlive();
