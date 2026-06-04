@@ -177,15 +177,22 @@ The extension **starts empty**; everything lives in `chrome.storage.local`.
 
 ```
 extension/
-├─ manifest.json   permissions: cookies, browsingData, storage, tabs, scripting, alarms
+├─ manifest.json   permissions: cookies, browsingData, storage, tabs, scripting, alarms, offscreen
 │                  host_permissions: cloud.oracle.com, *.oraclecloud.com, *.oracle.com
 ├─ background.js   service worker: switchTo() (+ last-active bypass), upsertTenant()/
-│                  removeTenant() via /v2/domains, clearSession(), keep-alive (alarms)
+│                  removeTenant() via /v2/domains, clearSession(), keep-alive (alarms),
+│                  light/dark toolbar icon swap
 ├─ popup.html/js   3 views (accounts / add / settings); account cards, switch buttons,
 │                  ↻ refresh, ✕ remove, keep-alive readout
 ├─ content.js      optional auto-click of the SAML/SSO button on the IDCS signin page
-└─ icons/          oxconnect{16,32,48,128}.png
+├─ offscreen.html/js  reads prefers-color-scheme (matchMedia, unavailable in the SW) and
+│                  reports it so the toolbar icon swaps light/dark
+└─ icons/          oxconnect{16,32,48,128}.png + oxconnect{…}_darkmode.png (inverted)
 ```
+
+The toolbar icon follows the OS/browser color scheme: an offscreen document detects
+`prefers-color-scheme` at load (and on change) → background `chrome.action.setIcon()`
+picks the normal icons (light) or the `_darkmode` inverted icons (dark).
 Load via `chrome://extensions` → Developer mode → **Load unpacked** → select `extension/`.
 
 ---

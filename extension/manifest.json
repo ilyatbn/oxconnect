@@ -3,7 +3,7 @@
   "name": "oxconnect — OCI tenant switcher",
   "version": "0.1.0",
   "description": "One-click switch between multiple Oracle Cloud (OCI) tenancies / identity domains. Defeats cloud.oracle.com session stickiness.",
-  "permissions": ["cookies", "browsingData", "storage", "tabs", "scripting", "alarms"],
+  "permissions": ["cookies", "browsingData", "storage", "tabs", "scripting", "alarms", "offscreen"],
   "host_permissions": [
     "https://cloud.oracle.com/*",
     "https://*.oraclecloud.com/*",
