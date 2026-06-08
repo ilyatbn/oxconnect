@@ -257,7 +257,12 @@ const DEFAULT_ALIASES = {
   bucket: 'Buckets Object Storage',
   oke: 'Kubernetes Clusters',
   k8s: 'Kubernetes Clusters',
-  lb: 'Load Balancers',
+  alb: 'Load Balancers',
+  vpc: 'Virtual Cloud Networks Networking',
+  ec2: 'Instances Compute',
+  s3: 'Object Storage Buckets',
+  redis: 'OCI Cache Clusters',
+  rds: 'PostgreSQL DB Systems',
 };
 
 let fuse = null;          // Fuse index over the catalog
