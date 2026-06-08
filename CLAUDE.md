@@ -126,10 +126,18 @@ The extension **starts empty**; everything lives in `chrome.storage.local`.
 
 ### Switching + last-active bypass
 - Clicking a domain calls `switchTo(target)`:
-  - If the target **equals the last-switched** one (`activeTarget`), the session is
-    still live → **bypass** the clear/re-auth and just open `https://cloud.oracle.com/`.
-  - Otherwise: clear the Oracle session (recipe above) → open the
-    `?tenant&domain` console URL → store `activeTarget` → reset keep-alive state.
+  - If the target **equals the last-switched** one (`activeTarget`) **and** the session
+    hasn't aged out, it's still live → **bypass** the clear/re-auth and just open
+    `https://cloud.oracle.com/`.
+  - Otherwise (different target, or the active one but **aged out**): clear the Oracle
+    session (recipe above) → open the `?tenant&domain` console URL → store
+    `activeTarget` + `activeSince = Date.now()` → reset keep-alive state.
+- **Session aging (`settings.sessionMaxAgeMin`, default 360 = 6h; 0 = never):**
+  `activeSince` records the time of the last *full* sign-in and is **preserved across
+  bypasses**, so age is measured from the initial login, not the last click. Clicking
+  the active account once `Date.now() - activeSince > sessionMaxAgeMin` re-runs the full
+  clear/re-auth instead of bypassing — defeating a silently-expired Oracle session.
+  Configurable via the **Re-login after** dropdown in Settings.
 - Honors the **Open in new tab** setting.
 - The active domain button shows green **`• live`**; it turns yellow
   **`• keep-alive failed`** when keep-alive last failed (see below).
@@ -166,9 +174,10 @@ The extension **starts empty**; everything lives in `chrome.storage.local`.
 ### `chrome.storage.local` keys
 | key | shape |
 |-----|-------|
-| `settings` | `{ autoClickSso, openInNewTab, keepAlive, discoveryRegion }` |
+| `settings` | `{ autoClickSso, openInNewTab, keepAlive, discoveryRegion, sessionMaxAgeMin }` |
 | `tenants` | `[{ tenantName, label, domains:[{domainName,domainType,domainHomeRegion,domainRegion,domainUrl,domainOcid}], lastRefreshed }]` |
 | `activeTarget` | `"<tenantName>|<domainName>"` — last successfully switched profile |
+| `activeSince` | epoch ms of the last full sign-in (drives session aging; preserved across bypasses) |
 | `keepAliveState` | `{ status, ok, lastRun, httpStatus, region, profile, changed[], failCount, nextFetchRetry, error }` |
 
 ---

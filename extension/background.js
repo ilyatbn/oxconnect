@@ -11,10 +11,19 @@
 // See ../CLAUDE.md for the full mechanism.
 
 const DEFAULT_DISCOVERY_REGION = 'us-ashburn-1'; // resolves any tenant's home region itself
+const DEFAULT_SESSION_MAX_AGE_MIN = 360; // 6h: re-login when reusing a session older than this (0 = never)
 
 async function discoveryRegion() {
   const { settings = {} } = await chrome.storage.local.get('settings');
   return settings.discoveryRegion || DEFAULT_DISCOVERY_REGION;
+}
+
+// How long a switched-in session may be reused (via the last-active bypass) before
+// clicking the same account forces a full re-login instead. 0 = never expire.
+async function sessionMaxAgeMin() {
+  const { settings = {} } = await chrome.storage.local.get('settings');
+  const v = settings.sessionMaxAgeMin;
+  return v === undefined || v === null ? DEFAULT_SESSION_MAX_AGE_MIN : v;
 }
 
 // Starts empty — the user adds accounts by name; metadata is fetched from the
@@ -114,10 +123,15 @@ const targetKey = (target) => `${target.tenantName}|${target.domainName || ''}`;
 // target = { tenantName, label, ...domain fields }
 async function switchTo(target, openInNewTab) {
   const key = targetKey(target);
-  const { activeTarget } = await chrome.storage.local.get('activeTarget');
-  // If this tenant/domain is already the active one, the session is still live —
-  // skip the clear + re-auth and just open the console.
-  if (activeTarget === key) {
+  const { activeTarget, activeSince } = await chrome.storage.local.get(['activeTarget', 'activeSince']);
+  // The session ages out maxAgeMin after the last full sign-in (activeSince is set
+  // on a real switch, preserved across bypasses — so we measure from initial login,
+  // not from the last click). Once expired, re-clicking the active account re-logs in.
+  const maxAgeMin = await sessionMaxAgeMin();
+  const expired = maxAgeMin > 0 && activeSince && Date.now() - activeSince > maxAgeMin * 60 * 1000;
+  // If this tenant/domain is already the active one AND the session hasn't aged out,
+  // it's still live — skip the clear + re-auth and just open the console.
+  if (activeTarget === key && !expired) {
     const url = 'https://cloud.oracle.com/';
     await openUrl(url, openInNewTab);
     return { url, bypassed: true, cookiesRemoved: 0 };
@@ -125,9 +139,9 @@ async function switchTo(target, openInNewTab) {
   const cleared = await clearOracleSession(target);
   const url = buildConsoleUrl(target);
   await openUrl(url, openInNewTab);
-  await chrome.storage.local.set({ activeTarget: key });
+  await chrome.storage.local.set({ activeTarget: key, activeSince: Date.now() });
   await resetKeepAlive(); // fresh session — clear any prior stale/backoff state
-  return { url, bypassed: false, ...cleared };
+  return { url, bypassed: false, expired: !!expired, ...cleared };
 }
 
 // Discover identity domains for a tenancy name via the public /v2/domains API.
@@ -176,7 +190,7 @@ async function upsertTenant(tenantName, label) {
 async function removeTenant(tenantName) {
   const { tenants = [], activeTarget } = await chrome.storage.local.get(['tenants', 'activeTarget']);
   await chrome.storage.local.set({ tenants: tenants.filter((t) => t.tenantName !== tenantName) });
-  if (activeTarget && activeTarget.startsWith(tenantName + '|')) await chrome.storage.local.remove('activeTarget');
+  if (activeTarget && activeTarget.startsWith(tenantName + '|')) await chrome.storage.local.remove(['activeTarget', 'activeSince']);
   return true;
 }
 
@@ -184,7 +198,7 @@ async function removeTenant(tenantName) {
 // full clear + re-auth rather than bypassing.
 async function clearSession() {
   const result = await clearOracleSession(null);
-  await chrome.storage.local.remove('activeTarget');
+  await chrome.storage.local.remove(['activeTarget', 'activeSince']);
   await resetKeepAlive();
   return result;
 }

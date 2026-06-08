@@ -116,6 +116,22 @@
     </div>
 
     <div class="setting">
+      <div class="label">Re-login after
+        <div class="desc">Clicking the active account normally reuses its live session. Once this long has passed since the last full sign-in, clicking it forces a fresh re-login instead.</div>
+      </div>
+      <select id="optMaxAge">
+        <option value="60">1 hour</option>
+        <option value="120">2 hours</option>
+        <option value="240">4 hours</option>
+        <option value="360">6 hours</option>
+        <option value="480">8 hours</option>
+        <option value="720">12 hours</option>
+        <option value="1440">24 hours</option>
+        <option value="0">Never (always reuse live session)</option>
+      </select>
+    </div>
+
+    <div class="setting">
       <label class="row">
         <span class="label">Open switches in a new tab
           <div class="desc">Otherwise the active tab is reused.</div>

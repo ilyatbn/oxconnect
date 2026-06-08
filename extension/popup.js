@@ -72,6 +72,7 @@ async function loadSettings() {
     openInNewTab: !!settings.openInNewTab,
     keepAlive: !!settings.keepAlive,
     discoveryRegion: settings.discoveryRegion || DEFAULT_REGION,
+    sessionMaxAgeMin: settings.sessionMaxAgeMin === undefined ? 360 : settings.sessionMaxAgeMin,
   };
 }
 async function saveSetting(key, val) {
@@ -164,7 +165,9 @@ async function doSwitch(tenant, domain) {
   const target = { tenantName: tenant.tenantName, label: tenant.label, ...domain };
   const r = await send({ type: 'switch', target, openInNewTab });
   if (r?.ok) {
-    status(r.result.bypassed ? 'Already active — opening console…' : `Switched (${r.result.cookiesRemoved} cookies cleared). Completing SSO…`);
+    status(r.result.bypassed ? 'Already active — opening console…'
+      : r.result.expired ? `Session aged out — re-authenticating (${r.result.cookiesRemoved} cookies cleared)…`
+      : `Switched (${r.result.cookiesRemoved} cookies cleared). Completing SSO…`);
     window.close();
   } else status('Error: ' + (r?.error || 'unknown'));
 }
@@ -237,6 +240,7 @@ $('#addBack').addEventListener('click', () => { addStatus(''); showView('#mainVi
 $('#optNewTab').addEventListener('change', (e) => saveSetting('openInNewTab', e.target.checked));
 $('#optAutoSso').addEventListener('change', (e) => saveSetting('autoClickSso', e.target.checked));
 $('#optRegion').addEventListener('change', (e) => saveSetting('discoveryRegion', e.target.value));
+$('#optMaxAge').addEventListener('change', (e) => saveSetting('sessionMaxAgeMin', parseInt(e.target.value, 10)));
 $('#optKeepAlive').addEventListener('change', async (e) => {
   await saveSetting('keepAlive', e.target.checked);
   await send({ type: 'syncKeepAlive' }); // start/stop the 1-min alarm (+ immediate check on enable)
@@ -262,6 +266,7 @@ $('#clear').addEventListener('click', async () => {
   $('#optNewTab').checked = s.openInNewTab;
   $('#optAutoSso').checked = s.autoClickSso;
   $('#optKeepAlive').checked = s.keepAlive;
+  $('#optMaxAge').value = String(s.sessionMaxAgeMin);
   populateRegions(s.discoveryRegion);
   renderKeepAlive();
   render();
