@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <style>
     :root { color-scheme: light dark; }
-    body { font: 13px/1.4 -apple-system, system-ui, sans-serif; width: 340px; margin: 0; padding: 10px; }
+    body { font: 13px/1.4 -apple-system, system-ui, sans-serif; width: 440px; margin: 0; padding: 10px; }
 
     .topbar { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; }
     .topbar h1 { font-size: 13px; margin: 0; flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; }
@@ -70,10 +70,58 @@
     .sw input:checked + .track { background: #c74634; }
     .sw input:checked + .track::before { transform: translateX(14px); }
 
-    #status, #settingsStatus, #addStatus { font-size: 11px; color: #888; min-height: 14px; margin-top: 8px; white-space: pre-wrap; }
-  </style>
+    #status, #settingsStatus, #addStatus, #svcStatus, #aliasStatus { font-size: 11px; color: #888; min-height: 14px; margin-top: 8px; white-space: pre-wrap; }
+
+    /* search icon on the live row */
+    .findbtn { border: 1px solid #2e7d32aa; border-radius: 6px; background: #2e7d3214; cursor: pointer; font: inherit; padding: 2px 7px; line-height: 1; }
+    .findbtn:hover { border-color: #c74634; }
+
+    /* search view */
+    #svcQuery { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid #8884; border-radius: 6px; background: transparent; color: inherit; font: inherit; }
+    .svcresults { margin-top: 8px; max-height: 360px; overflow-y: auto; }
+    .svcrow { display: flex; justify-content: space-between; align-items: center; gap: 8px; width: 100%; text-align: left; padding: 7px 9px; margin: 3px 0; border: 1px solid #8884; border-radius: 6px; background: #80808014; cursor: pointer; font: inherit; }
+    .svcrow:hover { background: #c746341a; border-color: #c74634; }
+    .svcrow .nm { font-weight: 600; }
+    .svcrow .grp { font-size: 11px; color: #888; flex: none; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .svcrow.alias { border-color: #c9a100; background: #c9a1001f; }
+    .svcrow .pin { font-size: 9px; color: #b8920a; margin-left: 4px; }
+    .svchint { font-size: 11px; color: #888; padding: 6px 2px; }
+    .svcfoot { font-size: 10px; color: #999; margin-top: 8px; display: flex; align-items: center; gap: 8px; }
+    .linklike { background: none; border: none; color: #c74634; cursor: pointer; font: inherit; padding: 0; text-decoration: underline; }
+
+    /* alias editor */
+    .aliasrow { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
+    .aliasrow input { flex: 1; min-width: 0; box-sizing: border-box; padding: 5px 7px; border: 1px solid #8884; border-radius: 6px; background: transparent; color: inherit; font: inherit; }
+    .aliasrow .arrow { color: #888; flex: none; }
+    .aliasrow .resolved { font-size: 10px; color: #888; }
+    .aliasdefault { font-size: 11px; color: #888; padding: 3px 2px; display: flex; justify-content: space-between; }
+
+    /* advanced settings editor */
+    .advgroup { font-weight: 600; font-size: 11px; color: #c74634; text-transform: uppercase; letter-spacing: .03em; margin: 12px 0 4px; }
+    .advrow { display: flex; align-items: center; gap: 8px; padding: 6px 2px; border-bottom: 1px solid #8882; }
+    .advrow .lbl { flex: 1; min-width: 0; }
+    .advrow .lbl .desc { font-size: 11px; color: #888; margin-top: 2px; }
+    .advrow input[type=number] { width: 92px; box-sizing: border-box; padding: 5px 7px; border: 1px solid #8884; border-radius: 6px; background: transparent; color: inherit; font: inherit; }
+    .advrow input.changed { border-color: #c74634; }
+
+    /* busy banner */
+    .busy { position: sticky; top: 0; z-index: 20; background: #c74634; color: #fff; font-weight: 600; font-size: 12px; text-align: center; padding: 7px 8px; margin: -10px -10px 8px; }
+
+    /* consent modal */
+    .modal[hidden] { display: none; } /* author display:flex below would otherwise override [hidden] */
+    .modal { position: fixed; inset: 0; background: #0008; display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 30; }
+    .modal-card { background: Canvas; color: CanvasText; border: 1px solid #8886; border-radius: 10px; padding: 14px; max-width: 300px; box-shadow: 0 8px 30px #0006; }
+    .modal-card h2 { font-size: 13px; margin: 0 0 8px; }
+    .modal-card p { font-size: 12px; color: #aaa; margin: 0 0 12px; }
+    .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+    .modal-actions button { padding: 6px 12px; border: 1px solid #8884; border-radius: 6px; background: #80808014; cursor: pointer; font: inherit; }
+    .modal-actions .primary { background: #c746341a; border-color: #c74634; font-weight: 600; }
+    .modal-actions button:hover { border-color: #c74634; }
+</style>
 </head>
 <body>
+  <div id="busyBanner" class="busy" hidden>⏳ Please wait — loading in progress…</div>
+
   <!-- ===== Main view ===== -->
   <div id="mainView">
     <div class="topbar">
@@ -161,6 +209,21 @@
       <button id="kaCheck" class="kacheck" hidden>Check now</button>
     </div>
 
+    <div class="setting">
+      <label class="row">
+        <span class="label">Service search
+          <div class="desc">Search and jump to any OCI console page. Builds a one-time catalog of all services by briefly opening a cloud.oracle.com tab (requires you to be signed in).</div>
+        </span>
+        <span class="sw"><input type="checkbox" id="optServiceSearch" /><span class="track"></span></span>
+      </label>
+      <div id="svcSettingStatus" class="kastatus"></div>
+    </div>
+
+    <div class="setting">
+      <button id="advOpen" title="Tune timeouts and toggles">Advanced settings →</button>
+      <div class="desc">Fine-tune keep-alive, catalog-build, and search internals (timeouts, page size, fuzzy weights).</div>
+    </div>
+
     <div class="setting" style="border-bottom:none;">
       <button id="clear" title="Sign out of OCI in this browser">Clear OCI session</button>
       <div class="desc">Clears Oracle cookies + SPA storage (keeps your corporate IdP). Resets the active tenant.</div>
@@ -169,6 +232,67 @@
     <div id="settingsStatus"></div>
   </div>
 
+  <!-- ===== Advanced settings view ===== -->
+  <div id="advView" hidden>
+    <div class="topbar">
+      <button id="advBack" class="back" title="Back">←</button>
+      <h1>Advanced settings</h1>
+      <button id="advReset" class="iconbtn" title="Reset all to defaults">reset</button>
+    </div>
+    <div class="desc" style="margin-bottom:6px;">Defaults live in <code>adv_settings.js</code>. Empty a field to restore its default.</div>
+    <div id="advList"></div>
+    <div id="advStatus"></div>
+  </div>
+
+  <!-- ===== Search view ===== -->
+  <div id="searchView" hidden>
+    <div class="topbar">
+      <button id="searchBack" class="back" title="Back">←</button>
+      <h1>Find a service</h1>
+      <button id="aliasOpen" class="iconbtn" title="Manage aliases">aliases</button>
+    </div>
+    <input id="svcQuery" placeholder="search services… (e.g. identity domains)" autocomplete="off" />
+    <div id="svcResults" class="svcresults"></div>
+    <div class="svcfoot">
+      <span id="svcFootInfo"></span>
+      <button id="svcRebuild" class="linklike">Rebuild catalog</button>
+    </div>
+    <div id="svcStatus"></div>
+  </div>
+
+  <!-- ===== Alias-management view ===== -->
+  <div id="aliasView" hidden>
+    <div class="topbar">
+      <button id="aliasBack" class="back" title="Back">←</button>
+      <h1>Search aliases</h1>
+    </div>
+    <div class="desc" style="margin-bottom:6px;">An alias maps a shortcut to a search phrase. Typing the alias jumps straight to its match.</div>
+    <div id="aliasList"></div>
+    <div class="aliasrow">
+      <input id="aliasKey" placeholder="alias (e.g. id)" autocomplete="off" />
+      <span class="arrow">→</span>
+      <input id="aliasPhrase" placeholder="target (e.g. Identity Domains)" autocomplete="off" />
+      <button id="aliasAdd" class="iconbtn" title="Add alias">+</button>
+    </div>
+    <div id="aliasStatus"></div>
+    <div class="desc" style="margin-top:10px;">Built-in aliases</div>
+    <div id="aliasDefaults"></div>
+  </div>
+
+  <!-- ===== Consent modal (service-search enable) ===== -->
+  <div id="searchConsent" class="modal" hidden>
+    <div class="modal-card">
+      <h2>Enable service search?</h2>
+      <p>Building the catalog briefly opens a <b>cloud.oracle.com</b> tab to read the full list of services, then closes it. This requires you to be signed in to a tenant.</p>
+      <div class="modal-actions">
+        <button id="consentCancel">Cancel</button>
+        <button id="consentOk" class="primary">I understand</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="adv_settings.js"></script>
+  <script src="vendor/fuse.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

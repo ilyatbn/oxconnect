@@ -10,8 +10,18 @@
 //
 // See ../CLAUDE.md for the full mechanism.
 
+// Tunable timeouts/toggles (and their defaults) live in adv_settings.js — the single
+// source of truth shared with the popup. self.ADV_DEFAULTS / advMerge come from there.
+importScripts('adv_settings.js');
+
 const DEFAULT_DISCOVERY_REGION = 'us-ashburn-1'; // resolves any tenant's home region itself
 const DEFAULT_SESSION_MAX_AGE_MIN = 360; // 6h: re-login when reusing a session older than this (0 = never)
+
+// Merged advanced settings (stored overrides over adv_settings.js defaults).
+async function advAll() {
+  const { advSettings = {} } = await chrome.storage.local.get('advSettings');
+  return advMerge(advSettings);
+}
 
 async function discoveryRegion() {
   const { settings = {} } = await chrome.storage.local.get('settings');
@@ -210,9 +220,7 @@ async function clearSession() {
 // profile as stale (popup turns it yellow).
 // ===========================================================================
 const KEEPALIVE_ALARM = 'oxconnect-keepalive';
-const KEEPALIVE_PERIOD_MIN = 1;
-const BACKOFF_BASE_MS = 60 * 1000;       // 1 min
-const BACKOFF_MAX_MS = 30 * 60 * 1000;   // cap at 30 min
+// Period + backoff base/cap are tunable in adv_settings.js (keepAlive* keys).
 
 async function setKeepAliveState(patch) {
   const { keepAliveState = {} } = await chrome.storage.local.get('keepAliveState');
@@ -224,8 +232,10 @@ async function resetKeepAlive() {
 
 async function syncKeepAliveAlarm() {
   const { settings = {} } = await chrome.storage.local.get('settings');
-  if (settings.keepAlive) await chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: KEEPALIVE_PERIOD_MIN });
-  else await chrome.alarms.clear(KEEPALIVE_ALARM);
+  if (settings.keepAlive) {
+    const periodInMinutes = (await advAll()).keepAlivePeriodMin;
+    await chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes });
+  } else await chrome.alarms.clear(KEEPALIVE_ALARM);
   return !!settings.keepAlive;
 }
 
@@ -290,7 +300,8 @@ async function runKeepAlive() {
     });
   } else {
     const failCount = (keepAliveState.failCount || 0) + 1;
-    const backoff = Math.min(BACKOFF_BASE_MS * 2 ** (failCount - 1), BACKOFF_MAX_MS);
+    const adv = await advAll();
+    const backoff = Math.min(adv.keepAliveBackoffBaseMs * 2 ** (failCount - 1), adv.keepAliveBackoffMaxMs);
     await setKeepAliveState({
       status: 'failed', ok: false, lastRun: Date.now(), httpStatus, region: prof.region,
       profile: prof.key, changed, failCount, nextFetchRetry: Date.now() + backoff,
@@ -301,6 +312,180 @@ async function runKeepAlive() {
 
 chrome.alarms.onAlarm.addListener((a) => { if (a.name === KEEPALIVE_ALARM) runKeepAlive(); });
 chrome.runtime.onStartup.addListener(() => { syncKeepAliveAlarm(); ensureThemeWatcher(); });
+
+// ===========================================================================
+// Service catalog (for the optional in-popup service search).
+//
+// The complete, labeled+grouped list of OCI console destinations only exists in
+// the AUTHENTICATED console: https://cloud.oracle.com/search/services renders it
+// client-side (no API) inside a same-origin iframe (name=sandbox-maui-preact-
+// container), paginated 50/page. There is no static JSON with display names, so
+// we build the catalog by opening that page in a tab and scraping the rendered
+// rows across all pages. Requires an active, signed-in tenant.
+// ===========================================================================
+
+// Quick "are we signed in?" check — reuses keep-alive's success test.
+async function consoleSessionLive(region) {
+  try {
+    const res = await fetch(`https://cloud.oracle.com/identity/domains/my-profile?region=${encodeURIComponent(region)}`,
+      { credentials: 'include', redirect: 'follow', cache: 'no-store' });
+    return res.ok && /^https:\/\/cloud\.oracle\.com\//.test(res.url);
+  } catch { return false; }
+}
+
+function waitForTabComplete(tabId, timeoutMs) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    const check = () => chrome.tabs.get(tabId, (tab) => {
+      if (chrome.runtime.lastError || !tab) return resolve(false);
+      if (tab.status === 'complete') return resolve(true);
+      if (Date.now() - t0 > timeoutMs) return resolve(false);
+      setTimeout(check, 500);
+    });
+    check();
+  });
+}
+
+// Injected into the build tab's top frame: a red "please wait" bar so the user knows
+// the briefly-opened cloud.oracle.com tab is ours and will close itself.
+function showBuildBanner() {
+  try {
+    const id = 'oxconnect-build-banner';
+    if (document.getElementById(id)) return;
+    const bar = document.createElement('div');
+    bar.id = id;
+    bar.textContent = '⏳ oxconnect is building the service catalog — please wait. This tab will close automatically.';
+    bar.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483647;background:#c74634;color:#fff;' +
+      'font:600 13px/1.4 -apple-system,system-ui,sans-serif;text-align:center;padding:9px 12px;box-shadow:0 2px 8px #0005;';
+    (document.documentElement || document.body).appendChild(bar);
+  } catch {}
+}
+
+// Injected into every frame of the services page. Only the services iframe has the
+// table; other frames bail out with null. Waits for render, then pages through the
+// whole list clicking the "Next" button, returning [{name, group, path}].
+// Self-contained (runs in the page; no outer-scope refs). All timeouts/toggles come in
+// via `opts` (sourced from adv_settings.js) so there are no magic numbers here.
+async function scrapeServicesPaged(opts) {
+  opts = opts || {};
+  const tick = opts.tickMs || 250;
+  const readyIters = Math.ceil((opts.readyTimeoutMs || 8000) / tick);
+  const advanceIters = Math.ceil((opts.pageAdvanceTimeoutMs || 3500) / tick);
+  const maxPages = opts.maxPages || 40;
+  const maximizeItemsPerPage = opts.maximizeItemsPerPage !== false;
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  const isServiceLink = (a) => {
+    const h = a.href || '';
+    return /^https:\/\/cloud\.oracle\.com\//.test(h) && !/cloud\.oracle\.com\/search\//.test(h) && norm(a.innerText);
+  };
+  // Wait for THIS frame to become the rendered services table.
+  let ready = false;
+  for (let i = 0; i < readyIters; i++) {
+    const hasPager = !!document.querySelector('button[aria-label="Next"]') || /total items/i.test(document.body.innerText);
+    if (hasPager && [...document.querySelectorAll('a[href]')].some(isServiceLink)) { ready = true; break; }
+    await sleep(tick);
+  }
+  if (!ready) return null; // not the services frame
+
+  const pageInd = () => { const m = document.body.innerText.match(/Page\s+(\d+)\s+of\s+(\d+)/i); return m ? m[0] : ''; };
+
+  // Best-effort: bump "Items per page" to its largest option so there are fewer pages.
+  // The widget is a custom combobox that ignores el.click() — it needs a full pointer
+  // event sequence to open. Falls back to the default page size on any failure.
+  const fireClick = (el) => {
+    for (const t of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+      const E = t.startsWith('pointer') ? PointerEvent : MouseEvent;
+      el.dispatchEvent(new E(t, { bubbles: true, cancelable: true, view: window }));
+    }
+  };
+  if (maximizeItemsPerPage) try {
+    const ipp = document.querySelector('input[aria-label="Items per page"]');
+    if (ipp) {
+      const before = pageInd();
+      ipp.focus(); fireClick(ipp);
+      await sleep(tick);
+      const opts2 = [...document.querySelectorAll('[role="option"]')];
+      let best = null, bestN = 0;
+      for (const o of opts2) { const n = parseInt(((o.innerText || '').match(/\d+/) || [0])[0], 10); if (n > bestN) { bestN = n; best = o; } }
+      if (best) { fireClick(best); for (let w = 0; w < advanceIters && pageInd() === before; w++) await sleep(tick); }
+    }
+  } catch { /* fall back to default page size */ }
+  const scrape = () => [...document.querySelectorAll('a[href]')].filter(isServiceLink).map((a) => {
+    const name = norm(a.innerText);
+    let row = a, group = '';
+    for (let i = 0; i < 7 && row; i++) {
+      row = row.parentElement; if (!row) break;
+      const t = norm(row.innerText);
+      if (t && t !== name && t.startsWith(name) && t.length > name.length) { group = norm(t.slice(name.length)); break; }
+    }
+    const u = new URL(a.href);
+    return { name, group, path: u.pathname + u.search };
+  });
+
+  const all = []; const seen = new Set();
+  for (let p = 0; p < maxPages; p++) {
+    for (const r of scrape()) { const k = r.name + '|' + r.group + '|' + r.path; if (!seen.has(k)) { seen.add(k); all.push(r); } }
+    const before = pageInd();
+    const next = [...document.querySelectorAll('button[aria-label="Next"]')].find((b) => !b.disabled);
+    if (!next) break;
+    next.click();
+    let advanced = false;
+    for (let w = 0; w < advanceIters; w++) { await sleep(tick); if (pageInd() !== before) { advanced = true; break; } }
+    if (!advanced) break; // no progress — stop rather than loop forever
+  }
+  return all;
+}
+
+// Open the services page in a tab, scrape every page, store the catalog. Tab focus,
+// timeouts and scraper tunables all come from adv_settings.js. The tab is closed when
+// done, restoring the user's previous tab.
+async function buildServiceCatalog() {
+  const prof = await resolveActiveProfile();
+  if (!prof) throw new Error('Switch to a tenant first, then build the catalog.');
+  const region = prof.region;
+  if (!(await consoleSessionLive(region))) throw new Error('Not signed in — switch to a tenant, then build the catalog.');
+
+  const adv = await advAll();
+  const scrapeOpts = {
+    tickMs: adv.scrapeTickMs,
+    readyTimeoutMs: adv.scrapeReadyTimeoutMs,
+    pageAdvanceTimeoutMs: adv.scrapePageAdvanceTimeoutMs,
+    maxPages: adv.scrapeMaxPages,
+    maximizeItemsPerPage: adv.maximizeItemsPerPage,
+  };
+  const [prevActive] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = await chrome.tabs.create({ url: `https://cloud.oracle.com/search/services?region=${encodeURIComponent(region)}`, active: !!adv.catalogTabActive });
+  try {
+    await waitForTabComplete(tab.id, adv.catalogTabLoadTimeoutMs);
+    try { await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: showBuildBanner }); } catch {}
+    let items = null;
+    for (let attempt = 0; attempt < adv.catalogInjectAttempts && !(items && items.length); attempt++) {
+      let results = [];
+      try {
+        results = await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, func: scrapeServicesPaged, args: [scrapeOpts] });
+      } catch (e) { /* frames may still be loading — retry */ }
+      for (const r of results) if (r && Array.isArray(r.result) && r.result.length) { items = r.result; break; }
+      if (!items) await new Promise((r) => setTimeout(r, adv.catalogInjectRetryMs));
+    }
+    if (!items || !items.length) {
+      throw new Error('Could not read the services list (0 rows). The page layout may have changed.');
+    }
+    const seen = new Set(); const dedup = [];
+    for (const it of items) {
+      if (!it.name || !it.path) continue;
+      const k = it.name + '|' + it.group + '|' + it.path;
+      if (!seen.has(k)) { seen.add(k); dedup.push({ name: it.name, group: it.group || '', path: it.path }); }
+    }
+    const catalog = { builtAt: Date.now(), region, items: dedup };
+    await chrome.storage.local.set({ serviceCatalog: catalog });
+    return { count: dedup.length, builtAt: catalog.builtAt, region };
+  } finally {
+    try { await chrome.tabs.remove(tab.id); } catch {}
+    if (prevActive?.id) { try { await chrome.tabs.update(prevActive.id, { active: true }); } catch {} }
+  }
+}
 
 // ---- message router ------------------------------------------------------
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -314,6 +499,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       else if (msg.type === 'syncKeepAlive') { const on = await syncKeepAliveAlarm(); if (on) await runKeepAlive(); sendResponse({ ok: true, enabled: on }); }
       else if (msg.type === 'runKeepAlive') { await runKeepAlive(); const { keepAliveState } = await chrome.storage.local.get('keepAliveState'); sendResponse({ ok: true, state: keepAliveState }); }
       else if (msg.type === 'colorScheme') { applyThemeIcon(!!msg.dark); sendResponse({ ok: true }); }
+      else if (msg.type === 'buildCatalog') sendResponse({ ok: true, ...(await buildServiceCatalog()) });
+      else if (msg.type === 'getCatalog') {
+        const { serviceCatalog = null } = await chrome.storage.local.get('serviceCatalog');
+        const prof = await resolveActiveProfile();
+        sendResponse({ ok: true, catalog: serviceCatalog, region: prof?.region || (await discoveryRegion()) });
+      }
+      else if (msg.type === 'openService') { await openUrl(msg.url, msg.openInNewTab); sendResponse({ ok: true }); }
       else sendResponse({ ok: false, error: 'unknown message type' });
     } catch (e) {
       sendResponse({ ok: false, error: e.message });

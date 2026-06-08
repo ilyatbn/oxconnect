@@ -171,14 +171,57 @@ The extension **starts empty**; everything lives in `chrome.storage.local`.
   password field), it auto-clicks it for true one-click. Selector heuristic
   (`SSO_TEXT`) may need tuning per IdP — it logs candidates to the console (`oxconnect`).
 
+### Service search (optional; `settings.serviceSearch`, default off)
+Search-and-jump to any OCI console page, with **fuzzy matching that beats Oracle's own
+search** (e.g. "identity domains" finds the **Domains** feature of the **Identity** group,
+which OCI's search misses).
+
+- **Why it's built by scraping a tab:** the complete labeled+grouped list of console
+  destinations exists **only in the authenticated console**. `https://cloud.oracle.com/search/services?region=<region>`
+  renders it client-side (no API; built from the nav tree) inside a **same-origin iframe**
+  (`name=sandbox-maui-preact-container`), paginated 50/page (~670 total). The unauth
+  `routeRegistry.json` has paths + intent ids but **no display names**; per-plugin i18n
+  bundles are too fragile to reconstruct. So there is no static JSON to fetch — we scrape.
+- **Enable flow (consent-gated):** the Settings toggle shows an **"I understand" modal**
+  explaining a `cloud.oracle.com` tab will briefly open; only on confirm does it flip on
+  and run the one-time build. All search UI (🔍 icon, search view, alias menu) is hidden
+  while off.
+- **Build (`buildServiceCatalog` in background.js):** resolve the active tenant's region →
+  login pre-flight (reuses keep-alive's `my-profile` probe) → open the services page in an
+  **active tab** (the inner SPA renders reliably when focused) → `chrome.scripting.executeScript`
+  the self-contained `scrapeServicesPaged` into **all frames** (only the iframe has the
+  table; others return null) → it waits for render, then pages through clicking the
+  `[aria-label="Next"]` button, extracting per row `{name, group, path}` (name = link text,
+  group = row's other cell, path = link's URL path, region-stripped) → dedupe → store
+  `serviceCatalog` → close the tab and restore the previous one. Verified: yields ~660
+  entries including `{name:"Domains", group:"Identity", path:"/identity/domains"}`.
+- **Search (popup.js):** Fuse.js (vendored, `vendor/fuse.js`) with the **token-search**
+  recipe — query `{ $and: tokens.map(t => ({ $or:[{name:t},{group:t}] })) }`,
+  `useExtendedSearch + ignoreLocation`, so every token must fuzzy-match name OR group.
+  Clicking a result opens `https://cloud.oracle.com<path>?region=<activeRegion>` honoring
+  the open-in-new-tab setting.
+- **Aliases:** built-in static map in code (`DEFAULT_ALIASES`: `id`→Identity Domains,
+  `lambda`→Functions Applications, …) merged with user aliases (`searchAliases`), editable
+  in a dedicated **alias menu**. An alias maps a shortcut → a search phrase; typing the
+  alias pins its top match above the normal fuzzy results (aliases are not indexed, so they
+  stay deterministic).
+- The 🔍 icon shows on the **active (live) domain row** only. **Type-to-search:** typing
+  any printable character on the accounts view jumps straight into the search view,
+  seeding the query.
+- During a build, a red "please wait" bar is **injected into the opened tab**
+  (`showBuildBanner`), since the popup closes when that tab takes focus.
+
 ### `chrome.storage.local` keys
 | key | shape |
 |-----|-------|
-| `settings` | `{ autoClickSso, openInNewTab, keepAlive, discoveryRegion, sessionMaxAgeMin }` |
+| `settings` | `{ autoClickSso, openInNewTab, keepAlive, discoveryRegion, sessionMaxAgeMin, serviceSearch }` |
 | `tenants` | `[{ tenantName, label, domains:[{domainName,domainType,domainHomeRegion,domainRegion,domainUrl,domainOcid}], lastRefreshed }]` |
 | `activeTarget` | `"<tenantName>|<domainName>"` — last successfully switched profile |
 | `activeSince` | epoch ms of the last full sign-in (drives session aging; preserved across bypasses) |
 | `keepAliveState` | `{ status, ok, lastRun, httpStatus, region, profile, changed[], failCount, nextFetchRetry, error }` |
+| `serviceCatalog` | `{ builtAt, region, items:[{ name, group, path }] }` — scraped service catalog for search |
+| `searchAliases` | `[{ alias, phrase }]` — user search aliases (merged over built-in `DEFAULT_ALIASES`) |
+| `advSettings` | `{ <key>: value }` — overrides for `adv_settings.js` tunables (missing key → its default) |
 
 ---
 
@@ -190,14 +233,28 @@ extension/
 │                  host_permissions: cloud.oracle.com, *.oraclecloud.com, *.oracle.com
 ├─ background.js   service worker: switchTo() (+ last-active bypass), upsertTenant()/
 │                  removeTenant() via /v2/domains, clearSession(), keep-alive (alarms),
-│                  light/dark toolbar icon swap
-├─ popup.html/js   3 views (accounts / add / settings); account cards, switch buttons,
-│                  ↻ refresh, ✕ remove, keep-alive readout
+│                  buildServiceCatalog() (tab-scrape), light/dark toolbar icon swap
+├─ popup.html/js   6 views (accounts / add / settings / search / aliases / advanced);
+│                  account cards, switch buttons, ↻ refresh, ✕ remove, keep-alive, search
+├─ adv_settings.js single source of truth for tunable timeouts/toggles (+ defaults);
+│                  shared by the SW (importScripts) and popup (<script>); see below
 ├─ content.js      optional auto-click of the SAML/SSO button on the IDCS signin page
 ├─ offscreen.html/js  reads prefers-color-scheme (matchMedia, unavailable in the SW) and
 │                  reports it so the toolbar icon swaps light/dark
+├─ vendor/fuse.js  vendored Fuse.js (UMD, global Fuse) for service-search fuzzy matching
 └─ icons/          oxconnect{16,32,48,128}.png + oxconnect{…}_darkmode.png (inverted)
 ```
+
+**Advanced settings (`adv_settings.js`).** All tunable timeouts/toggles — keep-alive
+period + backoff, catalog-build tab focus/timeouts/inject retries, the scraper's poll
+tick / render+page-advance waits / max-pages / maximize-items-per-page, and the search
+fuzzy threshold/weights/limits — are declared once in `adv_settings.js` as
+`ADV_SETTINGS` (key, label, type, default, group, desc), with `ADV_DEFAULTS`/`advMerge`
+helpers assigned onto `self`. The service worker `importScripts('adv_settings.js')` and
+the popup loads it via `<script>`. Stored overrides live in `advSettings`; the
+**Advanced settings** menu renders one control per entry (empty a field → restore its
+default; **reset** clears all). The injected scraper takes these as `opts` via
+`executeScript` args, so it stays free of magic numbers.
 
 The toolbar icon follows the OS/browser color scheme: an offscreen document detects
 `prefers-color-scheme` at load (and on change) → background `chrome.action.setIcon()`
@@ -220,6 +277,8 @@ hold captured tokens/session **and real account values**). They drive **real Chr
 | `scripts/switch2.js`     | Authenticated switch test (log in, then switch) | `scripts/trace2.log` |
 | `scripts/bypass.js`      | Dumps `/v2/domains` JSON; showed direct IDCS-authorize reaches signin (but see below) | `scripts/bypass.log` |
 | `scripts/bypass2.js`     | Found the picker-skip that PRESERVES server `state`: `?tenant=X&domain=<name>` (direct IDCS-authorize breaks login with "Invalid Parameter") | `scripts/bypass2.log` |
+| `scripts/open-console.js` | Opens Chrome with CDP (:9222) deep-linked to a tenant and idles, so you can log in for the captures below | — |
+| `scripts/capture-services.js` | Service-search Step-0: connects to the open browser over CDP, finds the services-page data source. Established: the list is built client-side (no API) and rendered in the `sandbox-maui-preact-container` iframe, paginated; scrape it. | `scripts/capture-services.{log,html}` |
 
 To learn a tenancy's identity domains: call
 `GET https://login.<anyRegion>.oraclecloud.com/v2/domains?tenant=<tenantName>` (curl
