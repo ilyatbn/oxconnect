@@ -336,7 +336,7 @@ async function runServiceSearch(q) {
   const results = $('#svcResults');
   results.innerHTML = '';
   q = (q || '').trim();
-  if (!q) { results.innerHTML = '<div class="svchint">Type to search by service or group name. Try an alias like “id”.</div>'; return; }
+  if (!q) { results.innerHTML = '<div class="svchint">Type to search by service or group name. Try an alias like “id”. </br> You can start search imediately by typing anything in the main menu.</div>'; return; }
 
   const aliasMap = await getAliasMap();
   const aliasPhrase = aliasMap[q.toLowerCase()];
@@ -358,6 +358,7 @@ function svcRow(it, isAlias) {
   const row = document.createElement('div');
   row.className = 'svcrow' + (isAlias ? ' alias' : '');
   const left = document.createElement('span');
+  left.className = 'svcname';
   left.innerHTML = `<span class="nm">${escapeHtml(it.name)}</span>` + (isAlias ? '<span class="pin">alias</span>' : '');
   const grp = document.createElement('span');
   grp.className = 'grp';

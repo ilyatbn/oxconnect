@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <style>
     :root { color-scheme: light dark; }
-    body { font: 13px/1.4 -apple-system, system-ui, sans-serif; width: 440px; margin: 0; padding: 10px; }
+    body { font: 13px/1.4 -apple-system, system-ui, sans-serif; width: 440px; margin: 0; padding: 10px; overflow-x: hidden; }
 
     .topbar { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; }
     .topbar h1 { font-size: 13px; margin: 0; flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; }
@@ -78,11 +78,12 @@
 
     /* search view */
     #svcQuery { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid #8884; border-radius: 6px; background: transparent; color: inherit; font: inherit; }
-    .svcresults { margin-top: 8px; max-height: 360px; overflow-y: auto; }
-    .svcrow { display: flex; justify-content: space-between; align-items: center; gap: 8px; width: 100%; text-align: left; padding: 7px 9px; margin: 3px 0; border: 1px solid #8884; border-radius: 6px; background: #80808014; cursor: pointer; font: inherit; }
+    .svcresults { margin-top: 8px; max-height: 360px; overflow-y: auto; overflow-x: hidden; }
+    .svcrow { display: flex; justify-content: space-between; align-items: center; gap: 8px; width: 100%; box-sizing: border-box; text-align: left; padding: 7px 9px; margin: 3px 0; border: 1px solid #8884; border-radius: 6px; background: #80808014; cursor: pointer; font: inherit; }
     .svcrow:hover { background: #c746341a; border-color: #c74634; }
+    .svcrow .svcname { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .svcrow .nm { font-weight: 600; }
-    .svcrow .grp { font-size: 11px; color: #888; flex: none; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .svcrow .grp { font-size: 11px; color: #888; flex: 0 1 auto; min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .svcrow.alias { border-color: #c9a100; background: #c9a1001f; }
     .svcrow .pin { font-size: 9px; color: #b8920a; margin-left: 4px; }
     .svchint { font-size: 11px; color: #888; padding: 6px 2px; }
