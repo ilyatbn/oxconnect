@@ -263,6 +263,7 @@ const DEFAULT_ALIASES = {
   s3: 'Object Storage Buckets',
   redis: 'OCI Cache Clusters',
   rds: 'PostgreSQL DB Systems',
+  sqs: 'Queues',
 };
 
 let fuse = null;          // Fuse index over the catalog
