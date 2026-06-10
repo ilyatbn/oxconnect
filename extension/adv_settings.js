@@ -10,6 +10,15 @@
 // Assigned onto `self` so it works in both the worker global scope and window.
 
 self.ADV_SETTINGS = [
+  // ---- Appearance ----
+  { key: 'iconTheme', group: 'Appearance', label: 'Toolbar icon', type: 'select', default: 'auto',
+    options: [
+      { value: 'auto', label: 'Auto (match OS)' },
+      { value: 'light', label: 'Force light (dark icon)' },
+      { value: 'dark', label: 'Force dark (white icon)' },
+    ],
+    desc: 'Auto follows the OS dark/light setting; override here if detection picks the wrong icon.' },
+
   // ---- Keep-Alive ----
   { key: 'keepAlivePeriodMin', group: 'Keep-Alive', label: 'Alarm period (min)', type: 'number', min: 1, step: 1, default: 1,
     desc: 'How often keep-alive pings the active tenant (Chrome minimum is 1).' },

@@ -496,6 +496,19 @@ function renderAdvView() {
         sw.append(inp, tr);
         inp.addEventListener('change', () => saveAdv(s.key, inp.checked));
         row.appendChild(sw);
+      } else if (s.type === 'select') {
+        const sel = document.createElement('select'); sel.className = 'advsel';
+        for (const o of s.options) {
+          const opt = document.createElement('option'); opt.value = o.value; opt.textContent = o.label;
+          sel.appendChild(opt);
+        }
+        sel.value = advGet(advSettings, s.key);
+        if (overridden) sel.classList.add('changed');
+        sel.addEventListener('change', () => {
+          if (sel.value === ADV_DEFAULTS[s.key]) { saveAdv(s.key, undefined); sel.classList.remove('changed'); }
+          else { saveAdv(s.key, sel.value); sel.classList.add('changed'); }
+        });
+        row.appendChild(sel);
       } else {
         const inp = document.createElement('input'); inp.type = 'number';
         if (s.min !== undefined) inp.min = s.min;

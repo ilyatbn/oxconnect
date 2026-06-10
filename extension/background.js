@@ -43,6 +43,7 @@ chrome.runtime.onInstalled.addListener(async () => {
   if (!settings) await chrome.storage.local.set({ settings: { autoClickSso: true } });
   await syncKeepAliveAlarm();
   await ensureThemeWatcher();
+  await resolveAndApplyIcon();
 });
 
 // ---- light/dark toolbar icon ---------------------------------------------
@@ -52,6 +53,26 @@ const DARK_ICONS = { 16: 'icons/oxconnect16_darkmode.png', 32: 'icons/oxconnect3
 function applyThemeIcon(dark) {
   try { chrome.action.setIcon({ path: dark ? DARK_ICONS : LIGHT_ICONS }); } catch {}
 }
+
+// Last scheme reported by the offscreen detector; used when the override is 'auto'.
+let lastDetectedDark = false;
+
+// Pick the icon: 'light'/'dark' force a variant, 'auto' (default) follows the OS.
+async function resolveAndApplyIcon() {
+  let dark = lastDetectedDark;
+  try {
+    const { advSettings = {} } = await chrome.storage.local.get('advSettings');
+    const mode = advSettings.iconTheme;
+    if (mode === 'light') dark = false;
+    else if (mode === 'dark') dark = true;
+  } catch {}
+  applyThemeIcon(dark);
+}
+
+// Re-pick the icon when the user changes the override in Advanced settings.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.advSettings) resolveAndApplyIcon();
+});
 
 // The service worker can't read matchMedia; an offscreen document does and reports
 // the color scheme (now + on change) via a 'colorScheme' message.
@@ -311,7 +332,7 @@ async function runKeepAlive() {
 }
 
 chrome.alarms.onAlarm.addListener((a) => { if (a.name === KEEPALIVE_ALARM) runKeepAlive(); });
-chrome.runtime.onStartup.addListener(() => { syncKeepAliveAlarm(); ensureThemeWatcher(); });
+chrome.runtime.onStartup.addListener(() => { syncKeepAliveAlarm(); ensureThemeWatcher(); resolveAndApplyIcon(); });
 
 // ===========================================================================
 // Service catalog (for the optional in-popup service search).
@@ -498,7 +519,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       else if (msg.type === 'clearOnly') sendResponse({ ok: true, result: await clearSession() });
       else if (msg.type === 'syncKeepAlive') { const on = await syncKeepAliveAlarm(); if (on) await runKeepAlive(); sendResponse({ ok: true, enabled: on }); }
       else if (msg.type === 'runKeepAlive') { await runKeepAlive(); const { keepAliveState } = await chrome.storage.local.get('keepAliveState'); sendResponse({ ok: true, state: keepAliveState }); }
-      else if (msg.type === 'colorScheme') { applyThemeIcon(!!msg.dark); sendResponse({ ok: true }); }
+      else if (msg.type === 'colorScheme') { lastDetectedDark = !!msg.dark; resolveAndApplyIcon(); sendResponse({ ok: true }); }
       else if (msg.type === 'buildCatalog') sendResponse({ ok: true, ...(await buildServiceCatalog()) });
       else if (msg.type === 'getCatalog') {
         const { serviceCatalog = null } = await chrome.storage.local.get('serviceCatalog');
