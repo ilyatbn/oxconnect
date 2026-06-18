@@ -80,7 +80,8 @@
     #svcQuery { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid #8884; border-radius: 6px; background: transparent; color: inherit; font: inherit; }
     .svcresults { margin-top: 8px; max-height: 360px; overflow-y: auto; overflow-x: hidden; }
     .svcrow { display: flex; justify-content: space-between; align-items: center; gap: 8px; width: 100%; box-sizing: border-box; text-align: left; padding: 7px 9px; margin: 3px 0; border: 1px solid #8884; border-radius: 6px; background: #80808014; cursor: pointer; font: inherit; }
-    .svcrow:hover { background: #c746341a; border-color: #c74634; }
+    .svcrow:hover, .svcrow:focus { background: #c746341a; border-color: #c74634; }
+    .svcrow:focus { outline: 2px solid #c74634; outline-offset: -2px; }
     .svcrow .svcname { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .svcrow .nm { font-weight: 600; }
     .svcrow .grp { font-size: 11px; color: #888; flex: 0 1 auto; min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

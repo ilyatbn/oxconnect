@@ -26,6 +26,12 @@
       "128": "icons/oxconnect128.png"
     }
   },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": { "default": "Ctrl+Shift+Q", "mac": "MacCtrl+Shift+Q" },
+      "description": "Open the oxconnect popup"
+    }
+  },
   "content_scripts": [
     {
       "matches": ["https://*.identity.oraclecloud.com/ui/v1/signin*"],

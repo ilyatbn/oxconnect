@@ -1,3 +1,8 @@
+0.1.3
+-----
+- CTRL+Shift+Q opens the popup menu now.
+- Added keyboard support to go up/down and click enter while still being able to type in search box.
+
 0.1.2
 -----
 - added forced re-login for clicking an active account after N hours.

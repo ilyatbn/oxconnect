@@ -358,6 +358,7 @@ async function runServiceSearch(q) {
 function svcRow(it, isAlias) {
   const row = document.createElement('div');
   row.className = 'svcrow' + (isAlias ? ' alias' : '');
+  row.tabIndex = -1; // focusable via keyboard navigation, not tab order
   const left = document.createElement('span');
   left.className = 'svcname';
   left.innerHTML = `<span class="nm">${escapeHtml(it.name)}</span>` + (isAlias ? '<span class="pin">alias</span>' : '');
@@ -367,7 +368,34 @@ function svcRow(it, isAlias) {
   row.append(left, grp);
   row.title = it.path;
   row.addEventListener('click', () => openService(it));
+  row.addEventListener('keydown', (e) => onResultKey(e, row, it));
   return row;
+}
+
+// Keyboard navigation within the results list. Up/Down move between rows (Up from
+// the first row returns to the search bar); Enter opens the highlighted service;
+// any other key (Backspace or a printable char) jumps back to the search bar and
+// applies the edit there, so typing resumes seamlessly.
+function onResultKey(e, row, it) {
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    if (row.nextElementSibling) row.nextElementSibling.focus();
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (row.previousElementSibling) row.previousElementSibling.focus();
+    else $('#svcQuery').focus();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    openService(it);
+  } else if (e.ctrlKey || e.metaKey || e.altKey || e.key === 'Tab') {
+    // let the browser/global shortcuts handle these
+  } else {
+    const q = $('#svcQuery');
+    if (e.key === 'Backspace') { q.value = q.value.slice(0, -1); e.preventDefault(); }
+    else if (e.key.length === 1) { q.value += e.key; e.preventDefault(); }
+    q.focus();
+    runServiceSearch(q.value);
+  }
 }
 
 async function openService(it) {
@@ -560,6 +588,13 @@ document.addEventListener('keydown', (e) => {
 
 // search view interactions
 $('#svcQuery').addEventListener('input', (e) => runServiceSearch(e.target.value));
+// ArrowDown from the search bar moves focus into the results list
+$('#svcQuery').addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown') {
+    const first = $('#svcResults').querySelector('.svcrow');
+    if (first) { e.preventDefault(); first.focus(); }
+  }
+});
 $('#svcRebuild').addEventListener('click', async () => { await rebuildCatalog($('#svcStatus')); openSearchView(); });
 $('#aliasAdd').addEventListener('click', addAlias);
 $('#aliasPhrase').addEventListener('keydown', (e) => { if (e.key === 'Enter') addAlias(); });
