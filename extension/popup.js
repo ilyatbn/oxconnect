@@ -350,7 +350,11 @@ async function runServiceSearch(q) {
   }
   const rest = tokenSearch(q).filter((it) => !seen.has(key(it)));
 
-  if (!pinned.length && !rest.length) { results.innerHTML = '<div class="svchint">No matches.</div>'; return; }
+  if (!pinned.length && !rest.length) {
+    results.innerHTML = '<div class="svchint">No matches.</div>';
+    results.appendChild(advQueryRow(q));
+    return;
+  }
   for (const it of pinned) results.appendChild(svcRow(it, true));
   for (const it of rest.slice(0, advCfg.searchResultLimit)) results.appendChild(svcRow(it, false));
 }
@@ -368,15 +372,42 @@ function svcRow(it, isAlias) {
   row.append(left, grp);
   row.title = it.path;
   row.addEventListener('click', () => openService(it));
-  row.addEventListener('keydown', (e) => onResultKey(e, row, it));
+  row.addEventListener('keydown', (e) => onResultKey(e, row, () => openService(it)));
   return row;
+}
+
+// A fallback row shown when nothing matches: opens Oracle's own resource search
+// (broader than our service catalog) for the typed query, in the configured region.
+function advQueryRow(query) {
+  const row = document.createElement('div');
+  row.className = 'svcrow alias';
+  row.tabIndex = -1;
+  const left = document.createElement('span');
+  left.className = 'svcname';
+  left.innerHTML = '<span class="nm">Advanced resources query</span>';
+  const grp = document.createElement('span');
+  grp.className = 'grp';
+  grp.textContent = 'search OCI resources';
+  row.append(left, grp);
+  row.title = `Search OCI resources for “${query}”`;
+  row.addEventListener('click', () => openResourcesQuery(query));
+  row.addEventListener('keydown', (e) => onResultKey(e, row, () => openResourcesQuery(query)));
+  return row;
+}
+
+async function openResourcesQuery(query) {
+  const { discoveryRegion, openInNewTab } = await loadSettings();
+  const region = discoveryRegion || catalogRegion || DEFAULT_REGION;
+  const url = `https://cloud.oracle.com/search/resources?q=${encodeURIComponent(query)}&region=${encodeURIComponent(region)}`;
+  await send({ type: 'openService', url, openInNewTab });
+  window.close();
 }
 
 // Keyboard navigation within the results list. Up/Down move between rows (Up from
 // the first row returns to the search bar); Enter opens the highlighted service;
 // any other key (Backspace or a printable char) jumps back to the search bar and
 // applies the edit there, so typing resumes seamlessly.
-function onResultKey(e, row, it) {
+function onResultKey(e, row, onOpen) {
   if (e.key === 'ArrowDown') {
     e.preventDefault();
     if (row.nextElementSibling) row.nextElementSibling.focus();
@@ -386,7 +417,7 @@ function onResultKey(e, row, it) {
     else $('#svcQuery').focus();
   } else if (e.key === 'Enter') {
     e.preventDefault();
-    openService(it);
+    onOpen();
   } else if (e.ctrlKey || e.metaKey || e.altKey || e.key === 'Tab') {
     // let the browser/global shortcuts handle these
   } else {
@@ -588,11 +619,15 @@ document.addEventListener('keydown', (e) => {
 
 // search view interactions
 $('#svcQuery').addEventListener('input', (e) => runServiceSearch(e.target.value));
-// ArrowDown from the search bar moves focus into the results list
+// ArrowDown from the search bar moves focus into the results list; Enter opens
+// the first available result (the keyboard click handler lives on the row).
 $('#svcQuery').addEventListener('keydown', (e) => {
   if (e.key === 'ArrowDown') {
     const first = $('#svcResults').querySelector('.svcrow');
     if (first) { e.preventDefault(); first.focus(); }
+  } else if (e.key === 'Enter') {
+    const first = $('#svcResults').querySelector('.svcrow');
+    if (first) { e.preventDefault(); first.click(); }
   }
 });
 $('#svcRebuild').addEventListener('click', async () => { await rebuildCatalog($('#svcStatus')); openSearchView(); });

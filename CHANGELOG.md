@@ -2,6 +2,7 @@
 -----
 - CTRL+Shift+Q opens the popup menu now.
 - Added keyboard support to go up/down and click enter while still being able to type in search box.
+- when nothing is found, adds a menu option to OCI Resource Explorer search.
 
 0.1.2
 -----
