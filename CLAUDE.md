@@ -100,10 +100,25 @@ can omit `&domain=` — they auto-forward.)
    - `chrome.browsingData.remove({origins:[…oracle origins…]}, {localStorage, indexedDB, cacheStorage, serviceWorkers})`.
      **Clearing cookies alone is NOT enough** — the SPA's localStorage/indexedDB
      pins the old tenant. You must clear both.
+1b. **Park every OTHER open Oracle tab on `about:blank` first** (`quiesceOracleTabs`).
+   This is mandatory when >1 `cloud.oracle.com` tab is open: otherwise each background
+   tab notices the session was cleared and **re-writes its old tenant's `_user_data`
+   back into the shared localStorage AND starts its own competing SAML login** — leaving
+   two tenants' state + parallel auth round-trips fighting, which surfaces as
+   **"Authentication error"**. Blanking a tab tears down its SPA immediately, ending the
+   race. (Single-tab switching never hit this; it only bites with multiple tabs.)
 2. Navigate the tab to `https://cloud.oracle.com/?tenant=<tenantName>&domain=<domainName>`
    (server mints a valid `state`; the picker is skipped).
 3. SSO completes — **silent** if the corporate IdP session is alive, otherwise the
    IDCS signin page where one SSO click finishes it. Floor is one click, not zero.
+4. **Restore the parked tabs** to their original URLs (now the new tenant) once the new
+   login has landed — gated on the target tab reaching `cloud.oracle.com` **without** the
+   `tenant=` deep-link param (the initial deep-link page fires `complete` too, and a probe
+   there silently re-auths to "live", so it must be skipped) *and* a live `my-profile`
+   probe (`maybeRestoreParkedTabs`, via `tabs.onUpdated`). Then waits `restoreDelayMs`
+   (adv setting, default 3000) so the console finishes hydrating — reloading the parked
+   tabs into that concurrent load breaks it. State lives in `pendingRestore` (storage), so
+   it survives a service-worker restart.
 
 **Constraint:** one active tenant per browser profile (single shared origin).
 Switching logs out the previous tenant. True parallel sessions require separate
@@ -201,6 +216,7 @@ which OCI's search misses).
 | `tenants` | `[{ tenantName, label, domains:[{domainName,domainType,domainHomeRegion,domainRegion,domainUrl,domainOcid}], lastRefreshed }]` |
 | `activeTarget` | `"<tenantName>|<domainName>"` — last successfully switched profile |
 | `activeSince` | epoch ms of the last full sign-in (drives session aging; preserved across bypasses) |
+| `pendingRestore` | `{ targetTabId, region, parked:[{tabId,url}], createdAt }` — tabs parked on `about:blank` during a switch, restored once the new login lands |
 | `serviceCatalog` | `{ builtAt, region, items:[{ name, group, path }] }` — scraped service catalog for search |
 | `searchAliases` | `[{ alias, phrase }]` — user search aliases (merged over built-in `DEFAULT_ALIASES`) |
 | `advSettings` | `{ <key>: value }` — overrides for `adv_settings.js` tunables (missing key → its default) |
@@ -228,7 +244,7 @@ extension/
 ```
 
 **Advanced settings (`adv_settings.js`).** All tunable timeouts/toggles —
-catalog-build tab focus/timeouts/inject retries, the scraper's poll
+the parked-tab restore delay, catalog-build tab focus/timeouts/inject retries, the scraper's poll
 tick / render+page-advance waits / max-pages / maximize-items-per-page, and the search
 fuzzy threshold/weights/limits — are declared once in `adv_settings.js` as
 `ADV_SETTINGS` (key, label, type, default, group, desc), with `ADV_DEFAULTS`/`advMerge`

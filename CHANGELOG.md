@@ -7,6 +7,9 @@
 - Added keyboard support to go up/down and click enter while still being able to type in search box.
 - when nothing is found, adds a menu option to OCI Resource Explorer search.
 - removed Keep-Alive (the per-minute session ping); dropped the `alarms` permission.
+- fixed "Authentication error" when switching with multiple Oracle Cloud tabs open: other
+  tabs are parked on about:blank during the switch (so they can't race the re-login), then
+  restored to their original pages once the new tenant has signed in.
 
 0.1.2
 -----

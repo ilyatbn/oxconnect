@@ -19,6 +19,10 @@ self.ADV_SETTINGS = [
     ],
     desc: 'Auto follows the OS dark/light setting; override here if detection picks the wrong icon.' },
 
+  // ---- Tab restore ----
+  { key: 'restoreDelayMs', group: 'Tab restore', label: 'Restore delay (ms)', type: 'number', min: 0, step: 500, default: 3000,
+    desc: 'After the new tenant signs in, wait this long before reloading the tabs that were parked during the switch — lets the console settle so the concurrent load does not break it.' },
+
   // ---- Service catalog build ----
   { key: 'catalogTabActive', group: 'Service catalog', label: 'Open build tab focused', type: 'bool', default: true,
     desc: 'Open the catalog-build tab active (the SPA renders reliably when focused) vs in the background.' },

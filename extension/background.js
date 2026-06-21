@@ -148,6 +148,54 @@ async function openUrl(url, openInNewTab) {
   else await chrome.tabs.create({ url });
 }
 
+// Park every open Oracle tab on about:blank, which tears down its SPA immediately.
+// Without this, the OTHER cloud.oracle.com tabs notice the session was cleared and each
+// (a) re-writes its old tenant's `_user_data` back into the shared localStorage and
+// (b) kicks off its own competing SAML login — leaving multiple tenants' state + parallel
+// auth round-trips fighting, which surfaces as "Authentication error". `exceptTabId` is the
+// tab we're about to drive to the new login, so we leave it for the caller to navigate.
+// Returns the parked tabs' { tabId, url } so they can be restored after the new login lands.
+async function quiesceOracleTabs(exceptTabId) {
+  const tabs = await chrome.tabs.query({ url: ['https://*.oracle.com/*', 'https://*.oraclecloud.com/*'] });
+  const parked = [];
+  await Promise.all(tabs.map((t) => {
+    if (t.id === undefined || t.id === exceptTabId) return null;
+    parked.push({ tabId: t.id, url: t.url });
+    return chrome.tabs.update(t.id, { url: 'about:blank' }).catch(() => {});
+  }));
+  return parked;
+}
+
+// Restore parked tabs once the new login has actually landed. Gated on the target tab
+// reaching cloud.oracle.com AND the session being live (a my-profile probe) — restoring
+// any earlier would just re-start the same multi-tab race we parked them to avoid.
+const RESTORE_MAX_MS = 5 * 60 * 1000; // give up if the login never completes
+async function maybeRestoreParkedTabs(tabId, tab) {
+  const { pendingRestore } = await chrome.storage.local.get('pendingRestore');
+  if (!pendingRestore || pendingRestore.targetTabId !== tabId) return;
+  if (Date.now() - pendingRestore.createdAt > RESTORE_MAX_MS) { await chrome.storage.local.remove('pendingRestore'); return; }
+  if (!tab?.url || !/^https:\/\/cloud\.oracle\.com\//.test(tab.url)) return;
+  // The initial deep-link page (cloud.oracle.com/?tenant=…&domain=…) also fires 'complete'
+  // BEFORE redirecting into the login flow — and a my-profile probe there silently re-auths
+  // and reports "live", which would restore far too early. Skip while the tenant= deep-link
+  // param is still on the URL; only the post-login console URL lacks it.
+  if (/[?&]tenant=/.test(tab.url)) return;
+  if (!(await consoleSessionLive(pendingRestore.region))) return; // login not finished yet
+  await chrome.storage.local.remove('pendingRestore'); // claim before navigating, so we don't double-restore
+  // Let the freshly-loaded console settle (it paints a top bar, then hydrates the rest);
+  // reloading the parked tabs into that concurrent load breaks it. Delay is tunable.
+  const { restoreDelayMs } = await advAll();
+  if (restoreDelayMs > 0) await new Promise((r) => setTimeout(r, restoreDelayMs));
+  for (const p of pendingRestore.parked) {
+    try { await chrome.tabs.update(p.tabId, { url: p.url }); } catch { /* tab was closed */ }
+  }
+}
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  // 'complete' covers full document loads; changeInfo.url covers the SPA's same-document
+  // hop from the #id_token landing to the final ?region= console URL (no 'complete' fires).
+  if (changeInfo.status === 'complete' || changeInfo.url) maybeRestoreParkedTabs(tabId, tab);
+});
+
 const targetKey = (target) => `${target.tenantName}|${target.domainName || ''}`;
 
 // target = { tenantName, label, ...domain fields }
@@ -166,11 +214,29 @@ async function switchTo(target, openInNewTab) {
     await openUrl(url, openInNewTab);
     return { url, bypassed: true, cookiesRemoved: 0 };
   }
+  // Pick the tab that will host the new login BEFORE we touch anything: the active tab
+  // (reused) unless opening in a new tab. Then park every OTHER Oracle tab so none of
+  // them races the re-auth by re-pinning storage or starting a competing SAML login.
+  let targetTabId;
+  if (!openInNewTab) {
+    const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+    targetTabId = active?.id;
+  }
+  const parked = await quiesceOracleTabs(targetTabId);
+
   const cleared = await clearOracleSession(target);
   const url = buildConsoleUrl(target);
-  await openUrl(url, openInNewTab);
+  if (targetTabId !== undefined) await chrome.tabs.update(targetTabId, { url });
+  else { const t = await chrome.tabs.create({ url }); targetTabId = t.id; }
   await chrome.storage.local.set({ activeTarget: key, activeSince: Date.now() });
-  return { url, bypassed: false, expired: !!expired, ...cleared };
+
+  // Restore the parked tabs to their original URLs (now the new tenant) once the login
+  // lands — see maybeRestoreParkedTabs, fired by the tabs.onUpdated listener.
+  if (parked.length && targetTabId !== undefined) {
+    const region = target.domainHomeRegion || (await discoveryRegion());
+    await chrome.storage.local.set({ pendingRestore: { targetTabId, region, parked, createdAt: Date.now() } });
+  }
+  return { url, bypassed: false, expired: !!expired, quiesced: parked.length, ...cleared };
 }
 
 // Discover identity domains for a tenancy name via the public /v2/domains API.

@@ -7,6 +7,8 @@ already in. oxconnect clears just the Oracle session and deep-links straight to 
 tenant you picked — login (corporate SSO) then completes in one click, or silently if
 your SSO session is still alive.
 
+oxconnect also support searching Oracle cloud offerings directly from within the extension as well as saving them as your favorite aliases.
+
 ## Install
 
 1. Open `chrome://extensions`
