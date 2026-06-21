@@ -19,14 +19,6 @@ self.ADV_SETTINGS = [
     ],
     desc: 'Auto follows the OS dark/light setting; override here if detection picks the wrong icon.' },
 
-  // ---- Keep-Alive ----
-  { key: 'keepAlivePeriodMin', group: 'Keep-Alive', label: 'Alarm period (min)', type: 'number', min: 1, step: 1, default: 1,
-    desc: 'How often keep-alive pings the active tenant (Chrome minimum is 1).' },
-  { key: 'keepAliveBackoffBaseMs', group: 'Keep-Alive', label: 'Backoff base (ms)', type: 'number', min: 1000, step: 1000, default: 60000,
-    desc: 'First retry delay after a failed ping; doubles each consecutive failure.' },
-  { key: 'keepAliveBackoffMaxMs', group: 'Keep-Alive', label: 'Backoff cap (ms)', type: 'number', min: 1000, step: 1000, default: 1800000,
-    desc: 'Maximum retry delay (the backoff ceiling).' },
-
   // ---- Service catalog build ----
   { key: 'catalogTabActive', group: 'Service catalog', label: 'Open build tab focused', type: 'bool', default: true,
     desc: 'Open the catalog-build tab active (the SPA renders reliably when focused) vs in the background.' },

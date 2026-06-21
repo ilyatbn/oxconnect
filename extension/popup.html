@@ -30,8 +30,6 @@
     }
     button.switch:hover { background: #c746341a; border-color: #c74634; }
     button.switch.active { border-color: #2e7d32aa; background: #2e7d3214; }
-    button.switch.warn { border-color: #c9a100; background: #c9a1001f; }
-    .badge.warn { background: #c9a100; color: #1a1a1a; }
     button.switch .meta { font-size: 11px; color: #888; }
     .badge { font-size: 9px; padding: 1px 5px; border-radius: 8px; background: #8883; margin-left: 4px; }
     .badge.live { background: #2e7d32; color: #fff; }
@@ -58,10 +56,6 @@
     .setting button:hover { border-color: #c74634; }
     .setting select { margin-top: 6px; width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #8884; border-radius: 6px; background: transparent; color: inherit; font: inherit; }
     .kastatus { font-size: 11px; color: #888; margin-top: 6px; white-space: pre-wrap; }
-    .kastatus .ok { color: #2e7d32; } .kastatus .fail { color: #b8920a; }
-    .kacheck { margin-top: 6px; padding: 5px 9px; border: 1px solid #8884; border-radius: 6px; background: #80808014; cursor: pointer; font: inherit; }
-    .kacheck:hover { border-color: #c74634; }
-    .cookielist { font-size: 10px; color: #999; margin-top: 4px; word-break: break-all; }
     /* iOS-style switch */
     .sw { position: relative; width: 34px; height: 20px; flex: none; }
     .sw input { opacity: 0; width: 0; height: 0; }
@@ -202,18 +196,6 @@
 
     <div class="setting">
       <label class="row">
-        <span class="label">Keep-Alive
-          <div class="desc">Every minute, pings the active tenant's profile endpoint to keep its session cookies fresh. Backs off on failure and marks the profile yellow.</div>
-        </span>
-        <span class="sw"><input type="checkbox" id="optKeepAlive" /><span class="track"></span></span>
-      </label>
-      <div id="kaStatus" class="kastatus"></div>
-      <div id="kaCookies" class="cookielist"></div>
-      <button id="kaCheck" class="kacheck" hidden>Check now</button>
-    </div>
-
-    <div class="setting">
-      <label class="row">
         <span class="label">Service search
           <div class="desc">Search and jump to any OCI console page. Builds a one-time catalog of all services by briefly opening a cloud.oracle.com tab (requires you to be signed in).</div>
         </span>
@@ -224,7 +206,7 @@
 
     <div class="setting">
       <button id="advOpen" title="Tune timeouts and toggles">Advanced settings →</button>
-      <div class="desc">Fine-tune keep-alive, catalog-build, and search internals (timeouts, page size, fuzzy weights).</div>
+      <div class="desc">Fine-tune catalog-build and search internals (timeouts, page size, fuzzy weights).</div>
     </div>
 
     <div class="setting" style="border-bottom:none;">

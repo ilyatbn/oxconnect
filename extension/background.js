@@ -41,7 +41,6 @@ async function sessionMaxAgeMin() {
 chrome.runtime.onInstalled.addListener(async () => {
   const { settings } = await chrome.storage.local.get('settings');
   if (!settings) await chrome.storage.local.set({ settings: { autoClickSso: true } });
-  await syncKeepAliveAlarm();
   await ensureThemeWatcher();
   await resolveAndApplyIcon();
 });
@@ -171,7 +170,6 @@ async function switchTo(target, openInNewTab) {
   const url = buildConsoleUrl(target);
   await openUrl(url, openInNewTab);
   await chrome.storage.local.set({ activeTarget: key, activeSince: Date.now() });
-  await resetKeepAlive(); // fresh session — clear any prior stale/backoff state
   return { url, bypassed: false, expired: !!expired, ...cleared };
 }
 
@@ -230,58 +228,11 @@ async function removeTenant(tenantName) {
 async function clearSession() {
   const result = await clearOracleSession(null);
   await chrome.storage.local.remove(['activeTarget', 'activeSince']);
-  await resetKeepAlive();
   return result;
 }
 
-// ===========================================================================
-// Keep-Alive: on a 1-min alarm, ping the console's my-profile endpoint for the
-// active tenant to keep its session cookies fresh. On failure, back off
-// exponentially (gated by `keepAliveState.nextFetchRetry`) and mark the active
-// profile as stale (popup turns it yellow).
-// ===========================================================================
-const KEEPALIVE_ALARM = 'oxconnect-keepalive';
-// Period + backoff base/cap are tunable in adv_settings.js (keepAlive* keys).
-
-async function setKeepAliveState(patch) {
-  const { keepAliveState = {} } = await chrome.storage.local.get('keepAliveState');
-  await chrome.storage.local.set({ keepAliveState: { ...keepAliveState, ...patch } });
-}
-async function resetKeepAlive() {
-  await chrome.storage.local.set({ keepAliveState: { status: 'idle', failCount: 0, nextFetchRetry: null, lastRun: null } });
-}
-
-async function syncKeepAliveAlarm() {
-  const { settings = {} } = await chrome.storage.local.get('settings');
-  if (settings.keepAlive) {
-    const periodInMinutes = (await advAll()).keepAlivePeriodMin;
-    await chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes });
-  } else await chrome.alarms.clear(KEEPALIVE_ALARM);
-  return !!settings.keepAlive;
-}
-
-// Snapshot Oracle cookies as {domain/path|name -> {value, exp}} for diffing.
-async function snapshotOracleCookies() {
-  const cookies = await chrome.cookies.getAll({});
-  const map = {};
-  for (const c of cookies) {
-    if (!/oracle/i.test(c.domain)) continue;
-    map[`${c.domain}${c.path}|${c.name}`] = { value: c.value, exp: c.expirationDate || 0, domain: c.domain, name: c.name };
-  }
-  return map;
-}
-function diffCookies(before, after) {
-  const changed = [];
-  for (const k of Object.keys(after)) {
-    const a = after[k], b = before[k];
-    if (!b) changed.push({ name: a.name, domain: a.domain, kind: 'added' });
-    else if (b.value !== a.value) changed.push({ name: a.name, domain: a.domain, kind: 'value' });
-    else if (b.exp !== a.exp) changed.push({ name: a.name, domain: a.domain, kind: 'expiry' });
-  }
-  for (const k of Object.keys(before)) if (!after[k]) changed.push({ name: before[k].name, domain: before[k].domain, kind: 'removed' });
-  return changed;
-}
-
+// Resolve the active tenant/domain into { tenantName, domainName, region, key },
+// using the domain's home region (falling back to the discovery region).
 async function resolveActiveProfile() {
   const { activeTarget, tenants = [] } = await chrome.storage.local.get(['activeTarget', 'tenants']);
   if (!activeTarget) return null;
@@ -292,47 +243,7 @@ async function resolveActiveProfile() {
   return { tenantName, domainName, region, key: activeTarget };
 }
 
-async function runKeepAlive() {
-  const { settings = {} } = await chrome.storage.local.get('settings');
-  if (!settings.keepAlive) { await chrome.alarms.clear(KEEPALIVE_ALARM); return; }
-
-  const { keepAliveState = {} } = await chrome.storage.local.get('keepAliveState');
-  if (keepAliveState.nextFetchRetry && Date.now() < keepAliveState.nextFetchRetry) return; // backing off
-
-  const prof = await resolveActiveProfile();
-  if (!prof) { await setKeepAliveState({ status: 'idle', lastRun: Date.now(), note: 'no active tenant' }); return; }
-
-  const url = `https://cloud.oracle.com/identity/domains/my-profile?region=${encodeURIComponent(prof.region)}`;
-  const before = await snapshotOracleCookies();
-  let ok = false, httpStatus = 0, error = null, finalUrl = '';
-  try {
-    const res = await fetch(url, { credentials: 'include', redirect: 'follow', cache: 'no-store' });
-    httpStatus = res.status;
-    finalUrl = res.url;
-    // Success = 2xx and we stayed on cloud.oracle.com (not bounced to a login/SSO host).
-    ok = res.ok && /^https:\/\/cloud\.oracle\.com\//.test(res.url);
-  } catch (e) { error = e.message; }
-  const changed = diffCookies(before, await snapshotOracleCookies());
-
-  if (ok) {
-    await setKeepAliveState({
-      status: 'ok', ok: true, lastRun: Date.now(), httpStatus, region: prof.region,
-      profile: prof.key, changed, failCount: 0, nextFetchRetry: null, error: null,
-    });
-  } else {
-    const failCount = (keepAliveState.failCount || 0) + 1;
-    const adv = await advAll();
-    const backoff = Math.min(adv.keepAliveBackoffBaseMs * 2 ** (failCount - 1), adv.keepAliveBackoffMaxMs);
-    await setKeepAliveState({
-      status: 'failed', ok: false, lastRun: Date.now(), httpStatus, region: prof.region,
-      profile: prof.key, changed, failCount, nextFetchRetry: Date.now() + backoff,
-      error: error || `bad response (http ${httpStatus}${finalUrl && !/cloud\.oracle\.com/.test(finalUrl) ? ', redirected to ' + new URL(finalUrl).host : ''})`,
-    });
-  }
-}
-
-chrome.alarms.onAlarm.addListener((a) => { if (a.name === KEEPALIVE_ALARM) runKeepAlive(); });
-chrome.runtime.onStartup.addListener(() => { syncKeepAliveAlarm(); ensureThemeWatcher(); resolveAndApplyIcon(); });
+chrome.runtime.onStartup.addListener(() => { ensureThemeWatcher(); resolveAndApplyIcon(); });
 
 // ===========================================================================
 // Service catalog (for the optional in-popup service search).
@@ -345,7 +256,7 @@ chrome.runtime.onStartup.addListener(() => { syncKeepAliveAlarm(); ensureThemeWa
 // rows across all pages. Requires an active, signed-in tenant.
 // ===========================================================================
 
-// Quick "are we signed in?" check — reuses keep-alive's success test.
+// Quick "are we signed in?" check: a 2xx from my-profile that stayed on cloud.oracle.com.
 async function consoleSessionLive(region) {
   try {
     const res = await fetch(`https://cloud.oracle.com/identity/domains/my-profile?region=${encodeURIComponent(region)}`,
@@ -517,8 +428,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       else if (msg.type === 'removeTenant') sendResponse({ ok: true, removed: await removeTenant(msg.tenantName) });
       else if (msg.type === 'discover') sendResponse({ ok: true, domains: await discoverDomains(msg.tenantName) });
       else if (msg.type === 'clearOnly') sendResponse({ ok: true, result: await clearSession() });
-      else if (msg.type === 'syncKeepAlive') { const on = await syncKeepAliveAlarm(); if (on) await runKeepAlive(); sendResponse({ ok: true, enabled: on }); }
-      else if (msg.type === 'runKeepAlive') { await runKeepAlive(); const { keepAliveState } = await chrome.storage.local.get('keepAliveState'); sendResponse({ ok: true, state: keepAliveState }); }
       else if (msg.type === 'colorScheme') { lastDetectedDark = !!msg.dark; resolveAndApplyIcon(); sendResponse({ ok: true }); }
       else if (msg.type === 'buildCatalog') sendResponse({ ok: true, ...(await buildServiceCatalog()) });
       else if (msg.type === 'getCatalog') {

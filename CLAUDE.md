@@ -131,7 +131,7 @@ The extension **starts empty**; everything lives in `chrome.storage.local`.
     `https://cloud.oracle.com/`.
   - Otherwise (different target, or the active one but **aged out**): clear the Oracle
     session (recipe above) → open the `?tenant&domain` console URL → store
-    `activeTarget` + `activeSince = Date.now()` → reset keep-alive state.
+    `activeTarget` + `activeSince = Date.now()`.
 - **Session aging (`settings.sessionMaxAgeMin`, default 360 = 6h; 0 = never):**
   `activeSince` records the time of the last *full* sign-in and is **preserved across
   bypasses**, so age is measured from the initial login, not the last click. Clicking
@@ -139,31 +139,14 @@ The extension **starts empty**; everything lives in `chrome.storage.local`.
   clear/re-auth instead of bypassing — defeating a silently-expired Oracle session.
   Configurable via the **Re-login after** dropdown in Settings.
 - Honors the **Open in new tab** setting.
-- The active domain button shows green **`• live`**; it turns yellow
-  **`• keep-alive failed`** when keep-alive last failed (see below).
+- The active domain button shows green **`• live`**.
 
 ### Settings (gear icon → in-popup view, back button to return)
 - **Discovery region** — dropdown of OCI commercial regions; default `us-ashburn-1`
   (`settings.discoveryRegion`). Controls which `login.<region>` endpoint discovery hits.
 - **Open switches in a new tab** — toggle (`settings.openInNewTab`).
-- **Keep-Alive** — toggle (`settings.keepAlive`); see below.
-- **Clear OCI session** — clears Oracle cookies + SPA storage, forgets `activeTarget`,
-  resets keep-alive. Leaves the corporate IdP session intact.
-
-### Keep-Alive
-- When on, a `chrome.alarms` alarm fires every **1 min** (MV3 minimum).
-- Each tick (`runKeepAlive`): skip if within a backoff window
-  (`keepAliveState.nextFetchRetry`); resolve the **active** tenant + its home region;
-  snapshot Oracle cookies → `fetch('https://cloud.oracle.com/identity/domains/my-profile?region=<region>', {credentials:'include'})`
-  → snapshot again and **diff** the cookies.
-  - **Success** (2xx and stayed on `cloud.oracle.com`): record `ok`, list the refreshed
-    cookies, reset fail count / backoff.
-  - **Failure** (network error, non-2xx, or redirected to a login host): exponential
-    backoff `1→2→4→8→16→30 min` (capped) via `nextFetchRetry`; mark the active profile
-    **yellow**.
-- State (`keepAliveState`) resets on a fresh switch and on Clear OCI session.
-- Settings shows a live readout (status, age, # cookies refreshed + names, next retry)
-  and a **Check now** button.
+- **Clear OCI session** — clears Oracle cookies + SPA storage, forgets `activeTarget`.
+  Leaves the corporate IdP session intact.
 
 ### content.js
 - Runs on `idcs-*.identity.oraclecloud.com/ui/v1/signin`. If `settings.autoClickSso`
@@ -187,7 +170,7 @@ which OCI's search misses).
   and run the one-time build. All search UI (🔍 icon, search view, alias menu) is hidden
   while off.
 - **Build (`buildServiceCatalog` in background.js):** resolve the active tenant's region →
-  login pre-flight (reuses keep-alive's `my-profile` probe) → open the services page in an
+  login pre-flight (a `my-profile` probe via `consoleSessionLive`) → open the services page in an
   **active tab** (the inner SPA renders reliably when focused) → `chrome.scripting.executeScript`
   the self-contained `scrapeServicesPaged` into **all frames** (only the iframe has the
   table; others return null) → it waits for render, then pages through clicking the
@@ -214,11 +197,10 @@ which OCI's search misses).
 ### `chrome.storage.local` keys
 | key | shape |
 |-----|-------|
-| `settings` | `{ autoClickSso, openInNewTab, keepAlive, discoveryRegion, sessionMaxAgeMin, serviceSearch }` |
+| `settings` | `{ autoClickSso, openInNewTab, discoveryRegion, sessionMaxAgeMin, serviceSearch }` |
 | `tenants` | `[{ tenantName, label, domains:[{domainName,domainType,domainHomeRegion,domainRegion,domainUrl,domainOcid}], lastRefreshed }]` |
 | `activeTarget` | `"<tenantName>|<domainName>"` — last successfully switched profile |
 | `activeSince` | epoch ms of the last full sign-in (drives session aging; preserved across bypasses) |
-| `keepAliveState` | `{ status, ok, lastRun, httpStatus, region, profile, changed[], failCount, nextFetchRetry, error }` |
 | `serviceCatalog` | `{ builtAt, region, items:[{ name, group, path }] }` — scraped service catalog for search |
 | `searchAliases` | `[{ alias, phrase }]` — user search aliases (merged over built-in `DEFAULT_ALIASES`) |
 | `advSettings` | `{ <key>: value }` — overrides for `adv_settings.js` tunables (missing key → its default) |
@@ -229,13 +211,13 @@ which OCI's search misses).
 
 ```
 extension/
-├─ manifest.json   permissions: cookies, browsingData, storage, tabs, scripting, alarms, offscreen
+├─ manifest.json   permissions: cookies, browsingData, storage, tabs, scripting, offscreen
 │                  host_permissions: cloud.oracle.com, *.oraclecloud.com, *.oracle.com
 ├─ background.js   service worker: switchTo() (+ last-active bypass), upsertTenant()/
-│                  removeTenant() via /v2/domains, clearSession(), keep-alive (alarms),
+│                  removeTenant() via /v2/domains, clearSession(),
 │                  buildServiceCatalog() (tab-scrape), light/dark toolbar icon swap
 ├─ popup.html/js   6 views (accounts / add / settings / search / aliases / advanced);
-│                  account cards, switch buttons, ↻ refresh, ✕ remove, keep-alive, search
+│                  account cards, switch buttons, ↻ refresh, ✕ remove, search
 ├─ adv_settings.js single source of truth for tunable timeouts/toggles (+ defaults);
 │                  shared by the SW (importScripts) and popup (<script>); see below
 ├─ content.js      optional auto-click of the SAML/SSO button on the IDCS signin page
@@ -245,8 +227,8 @@ extension/
 └─ icons/          oxconnect{16,32,48,128}.png + oxconnect{…}_darkmode.png (inverted)
 ```
 
-**Advanced settings (`adv_settings.js`).** All tunable timeouts/toggles — keep-alive
-period + backoff, catalog-build tab focus/timeouts/inject retries, the scraper's poll
+**Advanced settings (`adv_settings.js`).** All tunable timeouts/toggles —
+catalog-build tab focus/timeouts/inject retries, the scraper's poll
 tick / render+page-advance waits / max-pages / maximize-items-per-page, and the search
 fuzzy threshold/weights/limits — are declared once in `adv_settings.js` as
 `ADV_SETTINGS` (key, label, type, default, group, desc), with `ADV_DEFAULTS`/`advMerge`

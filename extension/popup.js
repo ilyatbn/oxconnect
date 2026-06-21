@@ -72,7 +72,6 @@ async function loadSettings() {
   return {
     autoClickSso: settings.autoClickSso !== false,
     openInNewTab: !!settings.openInNewTab,
-    keepAlive: !!settings.keepAlive,
     discoveryRegion: settings.discoveryRegion || DEFAULT_REGION,
     sessionMaxAgeMin: settings.sessionMaxAgeMin === undefined ? 360 : settings.sessionMaxAgeMin,
     serviceSearch: !!settings.serviceSearch,
@@ -93,21 +92,13 @@ function ago(ts) {
   if (s < 86400) return Math.floor(s / 3600) + 'h ago';
   return Math.floor(s / 86400) + 'd ago';
 }
-function inFuture(ts) {
-  if (!ts) return '';
-  const s = Math.round((ts - Date.now()) / 1000);
-  if (s <= 0) return 'now';
-  if (s < 60) return s + 's';
-  return Math.floor(s / 60) + 'm';
-}
 function escapeHtml(s) {
   return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
 
 async function render() {
-  const { tenants = [], activeTarget, keepAliveState = {}, settings = {}, serviceCatalog = null } =
-    await chrome.storage.local.get(['tenants', 'activeTarget', 'keepAliveState', 'settings', 'serviceCatalog']);
-  const kaFailed = keepAliveState.status === 'failed';
+  const { tenants = [], activeTarget, settings = {}, serviceCatalog = null } =
+    await chrome.storage.local.get(['tenants', 'activeTarget', 'settings', 'serviceCatalog']);
   const searchReady = !!settings.serviceSearch && !!(serviceCatalog && serviceCatalog.items && serviceCatalog.items.length);
   searchAvailable = searchReady; // enables type-to-search from the accounts view
   const list = $('#list');
@@ -139,11 +130,10 @@ async function render() {
 
     for (const d of t.domains || []) {
       const isActive = activeTarget === `${t.tenantName}|${d.domainName || ''}`;
-      const warn = isActive && kaFailed;
       const btn = document.createElement('button');
-      btn.className = 'switch' + (warn ? ' warn' : isActive ? ' active' : '');
-      const badgeCls = warn ? ' warn' : isActive ? ' live' : '';
-      const badgeSuffix = warn ? ' • keep-alive failed' : isActive ? ' • live' : '';
+      btn.className = 'switch' + (isActive ? ' active' : '');
+      const badgeCls = isActive ? ' live' : '';
+      const badgeSuffix = isActive ? ' • live' : '';
       const left = document.createElement('span');
       left.innerHTML = `${escapeHtml(t.tenantName)}<span class="badge${badgeCls}">${escapeHtml(d.domainName)}${badgeSuffix}</span>`;
       const right = document.createElement('span');
@@ -162,7 +152,7 @@ async function render() {
       reg.textContent = d.domainHomeRegion || '';
       right.appendChild(reg);
       btn.append(left, right);
-      btn.title = warn ? 'Keep-alive failed — session may be stale; click to re-switch' : isActive ? 'Active — opens the console directly' : (d.domainUrl || '');
+      btn.title = isActive ? 'Active — opens the console directly' : (d.domainUrl || '');
       btn.addEventListener('click', () => doSwitch(t, d));
       card.appendChild(btn);
     }
@@ -215,32 +205,6 @@ async function doRemove(tenant) {
   const r = await send({ type: 'removeTenant', tenantName: tenant.tenantName });
   if (r?.ok) { status(`Removed ${tenant.tenantName}.`); render(); }
   else status('Remove failed: ' + (r?.error || 'unknown'));
-}
-
-// ---- keep-alive readout (settings) ----------------------------------------
-async function renderKeepAlive() {
-  const { keepAliveState: s = {} } = await chrome.storage.local.get('keepAliveState');
-  const enabled = $('#optKeepAlive').checked;
-  $('#kaCheck').hidden = !enabled;
-  const out = $('#kaStatus');
-  const cookies = $('#kaCookies');
-  cookies.textContent = '';
-
-  if (!enabled) { out.textContent = 'Off.'; return; }
-  if (!s.lastRun) { out.textContent = 'On · waiting for first check…'; return; }
-
-  if (s.status === 'ok') {
-    out.innerHTML = `<span class="ok">✓ ok</span> · ${ago(s.lastRun)} · ${(s.changed || []).length} cookie(s) refreshed`;
-    if ((s.changed || []).length) {
-      const names = [...new Set(s.changed.map((c) => c.name))];
-      cookies.textContent = 'refreshed: ' + names.slice(0, 12).join(', ') + (names.length > 12 ? ` +${names.length - 12} more` : '');
-    }
-  } else if (s.status === 'failed') {
-    out.innerHTML = `<span class="fail">✗ failed</span> · ${ago(s.lastRun)} · ${escapeHtml(s.error || '')}` +
-      (s.nextFetchRetry ? ` · retry in ${inFuture(s.nextFetchRetry)} (attempt ${s.failCount})` : '');
-  } else {
-    out.textContent = `${ago(s.lastRun)} · ${s.note || 'idle'}`;
-  }
 }
 
 // ---- service search -------------------------------------------------------
@@ -522,13 +486,11 @@ async function saveAdv(key, value) {
   await chrome.storage.local.set({ advSettings });
   await refreshAdvCfg();
   $('#advStatus').textContent = 'Saved.';
-  await send({ type: 'syncKeepAlive' }); // re-arm the alarm in case period/backoff changed
 }
 async function resetAdv() {
   await chrome.storage.local.set({ advSettings: {} });
   await refreshAdvCfg();
   $('#advStatus').textContent = 'Reset to defaults.';
-  await send({ type: 'syncKeepAlive' });
   renderAdvView();
 }
 function renderAdvView() {
@@ -594,7 +556,7 @@ $('#newLabel').addEventListener('keydown', (e) => { if (e.key === 'Enter') doAdd
 $('#newTenant').addEventListener('keydown', (e) => { if (e.key === 'Enter') doAdd(); });
 
 // view switching
-$('#gear').addEventListener('click', () => { showView('#settingsView'); renderKeepAlive(); renderSvcSetting(); });
+$('#gear').addEventListener('click', () => { showView('#settingsView'); renderSvcSetting(); });
 $('#back').addEventListener('click', () => showView('#mainView'));
 $('#plus').addEventListener('click', () => showView('#addView'));
 $('#addBack').addEventListener('click', () => { addStatus(''); showView('#mainView'); });
@@ -656,18 +618,6 @@ $('#optNewTab').addEventListener('change', (e) => saveSetting('openInNewTab', e.
 $('#optAutoSso').addEventListener('change', (e) => saveSetting('autoClickSso', e.target.checked));
 $('#optRegion').addEventListener('change', (e) => saveSetting('discoveryRegion', e.target.value));
 $('#optMaxAge').addEventListener('change', (e) => saveSetting('sessionMaxAgeMin', parseInt(e.target.value, 10)));
-$('#optKeepAlive').addEventListener('change', async (e) => {
-  await saveSetting('keepAlive', e.target.checked);
-  await send({ type: 'syncKeepAlive' }); // start/stop the 1-min alarm (+ immediate check on enable)
-  renderKeepAlive();
-  render(); // reflect any new keep-alive state on the active button
-});
-$('#kaCheck').addEventListener('click', async () => {
-  $('#kaStatus').textContent = 'Checking…';
-  await send({ type: 'runKeepAlive' });
-  renderKeepAlive();
-  render();
-});
 
 $('#clear').addEventListener('click', async () => {
   setStatus('Clearing OCI session…');
@@ -680,11 +630,9 @@ $('#clear').addEventListener('click', async () => {
   const s = await loadSettings();
   $('#optNewTab').checked = s.openInNewTab;
   $('#optAutoSso').checked = s.autoClickSso;
-  $('#optKeepAlive').checked = s.keepAlive;
   $('#optMaxAge').value = String(s.sessionMaxAgeMin);
   $('#optServiceSearch').checked = s.serviceSearch;
   populateRegions(s.discoveryRegion);
   await refreshAdvCfg();
-  renderKeepAlive();
   render();
 })();

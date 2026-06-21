@@ -30,9 +30,6 @@ The extension starts empty.
 - **Discovery region** — which region to look up new accounts from. Default
   `us-ashburn-1` works for most; change it if an account lives elsewhere.
 - **Open switches in a new tab** — otherwise the current tab is reused.
-- **Keep-Alive** — every minute, pings the active tenant to keep its session fresh. If
-  it fails, the active profile turns **yellow** and it retries with backoff. Shows the
-  last result and a **Check now** button.
 - **Clear OCI session** — signs you out of OCI in this browser (your corporate SSO
   stays intact).
 
