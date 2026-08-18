@@ -32,7 +32,7 @@
   const COMPARTMENT_MARKER = '.oj-oci-compartment-filter-control--compartment-select-container';
   const ROOT_ID = 'oxconnect-compartment-picker';
 
-  const state = { adv: null, tenant: null, comps: null, prefs: { pinned: [], aliases: {} } };
+  const state = { adv: null, tenant: null, comps: null, prefs: { pinned: [], aliases: {}, settings: {} } };
 
   // ---- storage -------------------------------------------------------------
 
@@ -41,7 +41,8 @@
   async function loadPrefs(tenant) {
     const { compartmentPrefs } = await chrome.storage.local.get('compartmentPrefs');
     const t = (compartmentPrefs || {})[tenant] || {};
-    return { pinned: Array.isArray(t.pinned) ? t.pinned : [], aliases: t.aliases || {} };
+    // `settings` is per-compartment extras (currently just { region }), keyed by OCID.
+    return { pinned: Array.isArray(t.pinned) ? t.pinned : [], aliases: t.aliases || {}, settings: t.settings || {} };
   }
   async function savePrefs(tenant, prefs) {
     const { compartmentPrefs } = await chrome.storage.local.get('compartmentPrefs');
@@ -97,6 +98,11 @@
         return [...byId.values()];
       };
 
+      const subs = new Map();
+      for (const t of tenants) {
+        if (db.objectStoreNames.contains(t.prefs)) subs.set(t.prefs, await get(t.prefs, 'subscribed-regions'));
+      }
+
       let best = null;
       for (const t of tenants) {
         const comps = await compsOf(t);
@@ -104,11 +110,21 @@
         const hasPrefs = db.objectStoreNames.contains(t.prefs);
         const activeId = hasPrefs ? await get(t.prefs, 'activeCompartmentId') : null;
         const activity = Number(hasPrefs ? (await get(t.prefs, 'lastUserActivity')) || 0 : 0);
+        // The tenancy's own subscribed-region list — the right menu to offer, since a
+        // tenancy can only be used in the regions it is subscribed to.
+        // shape: { data:[{ id:"IAD", displayName:"us-ashburn-1", friendlyName:"US East (Ashburn)" }] }
+        const regions = (() => {
+          try {
+            const raw = hasPrefs ? subs.get(t.prefs) : null;
+            return (parse(raw)?.data || []).map((r) => ({ id: r.id, name: r.displayName, label: r.friendlyName }))
+              .filter((r) => r.name);
+          } catch { return []; }
+        })();
         // (1) exact: this tenancy's remembered compartment is the one on the chip
         if (activeName && activeId && comps.some((c) => c.id === activeId && c.name === activeName))
-          return { tenant: t.tenant, comps, matchedBy: 'activeCompartment' };
+          return { tenant: t.tenant, comps, regions, matchedBy: 'activeCompartment' };
         // (2) fallback candidate
-        if (!best || activity > best.activity) best = { tenant: t.tenant, comps, activity, matchedBy: 'lastActivity' };
+        if (!best || activity > best.activity) best = { tenant: t.tenant, comps, regions, activity, matchedBy: 'lastActivity' };
       }
       return best;
     } finally { db.close(); }
@@ -166,10 +182,68 @@
     return true;
   }
 
+  // ---- region ---------------------------------------------------------------
+  //
+  // Where the console keeps the active region (traced by diffing all storage across a region
+  // switch — see scripts/region-trace.js). NO cookie is involved, which is why deleting the
+  // `?region=` query param just gets it re-added:
+  //   sessionStorage.region          "us-ashburn-1"   (region NAME, per tab)
+  //   sessionStorage.activeRegionId  "IAD"            (region KEY, per tab)
+  //   duplo <tenantName>/<userOcid> → activeRegionId  "IAD"  (durable, survives reloads)
+  // plus lazily-built per-region caches (`capability/<tenancyOcid>::<region>`, …).
+  //
+  // Writing those by hand would leave the SPA's in-memory state stale, so — exactly as with
+  // compartment selection — we drive the console's own region menu instead. That menu lives
+  // in the TOP frame, not the sandbox iframe this script's picker code runs in; both are
+  // cloud.oracle.com, so the top document is reachable.
+  function topDoc() {
+    try { if (window.top && window.top.document) return window.top.document; } catch { /* cross-origin */ }
+    return document;
+  }
+  function currentRegionName() {
+    try { const r = sessionStorage.getItem('region'); if (r) return r; } catch {}
+    try { return new URL(window.top.location.href).searchParams.get('region') || ''; } catch { return ''; }
+  }
+
+  // The extension's Discovery region doubles as the console default (the user's choice).
+  async function defaultRegion() {
+    const { settings } = await chrome.storage.local.get('settings');
+    return (settings && settings.discoveryRegion) || 'us-ashburn-1';
+  }
+
+  async function applyRegion(regionName, regions) {
+    if (!regionName || currentRegionName() === regionName) return true;
+    const doc = topDoc();
+    const btn = doc.getElementById('region-menu-button');
+    if (!btn) return false;
+    // The friendly label ("Germany Central (Frankfurt)") is what the menu renders; fall back to
+    // the raw region name in case the tenancy's subscribed-region list did not have a label.
+    const label = (regions.find((r) => r.name === regionName) || {}).label || regionName;
+    const items = () => [...doc.querySelectorAll('.region-selector a.dropmenu__option-item')];
+    const find = () => items().find((e) => (e.innerText || '').includes(label))
+                    || items().find((e) => (e.innerText || '').includes(regionName));
+    // The menu's anchors stay in the DOM while it is closed, so only open it when they are
+    // not actually laid out (`offsetParent === null`) — clicking the button blindly would
+    // toggle an already-open menu shut.
+    let hit = find();
+    if (!hit || hit.offsetParent === null) {
+      btn.click();
+      hit = await until(() => { const h = find(); return h && h.offsetParent !== null ? h : null; }, 4000);
+    }
+    if (!hit) { if (find()) btn.click(); return false; }   // not subscribed — leave the menu as we found it
+    hit.click();
+    return true;
+  }
+
   // ---- UI ------------------------------------------------------------------
 
-  const ICON_PIN = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M9.5 1.5 14.5 6.5l-1.4 1.4-.7-.7-2.8 2.8.7 2.1-1.1 1.1L6 10.9l-3.5 3.5-.9-.9L5.1 10 1.8 6.8l1.1-1.1 2.1.7L7.8 3.6l-.7-.7z"/></svg>';
-  const ICON_ALIAS = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3 1.5h6.2L13 5.3V14.5H3zm5.8 1.2v3h3zM4.8 8h6.4v1.1H4.8zm0 2.4h6.4v1.1H4.8zm0-4.8h2.6v1.1H4.8z"/></svg>';
+  const svg = (body) => `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">${body}</svg>`;
+  // Pinned rows get a SOLID pin (and the accent colour); unpinned get a hollow outline, so the
+  // two states differ in shape as well as colour rather than only in shade.
+  const ICON_PIN_OFF = svg('<path fill="none" stroke="currentColor" stroke-width="1.3" d="M9.5 2.2 13.8 6.5l-1 1-.6-.6-2.9 2.9.6 1.8-.7.7-4.4-4.4.7-.7 1.8.6 2.9-2.9-.6-.6zM5.5 10.5 2.6 13.4"/>');
+  const ICON_PIN_ON = svg('<path d="M9.5 1.5 14.5 6.5l-1.4 1.4-.7-.7-2.8 2.8.7 2.1-1.1 1.1L6 10.9l-3.5 3.5-.9-.9L5.1 10 1.8 6.8l1.1-1.1 2.1.7L7.8 3.6l-.7-.7z"/>');
+  const ICON_ALIAS = svg('<path d="M3 1.5h6.2L13 5.3V14.5H3zm5.8 1.2v3h3zM4.8 8h6.4v1.1H4.8zm0 2.4h6.4v1.1H4.8zm0-4.8h2.6v1.1H4.8z"/>');
+  const ICON_GEAR = svg('<path d="M8 5.4A2.6 2.6 0 1 0 8 10.6 2.6 2.6 0 0 0 8 5.4m0 1.3a1.3 1.3 0 1 1 0 2.6 1.3 1.3 0 0 1 0-2.6"/><path d="m6.9 1 -.2 1.5a5.4 5.4 0 0 0-1.2.7L4.1 2.6 2.6 4.1l.6 1.4a5.4 5.4 0 0 0-.7 1.2L1 6.9v2.2l1.5.2q.27.65.7 1.2l-.6 1.4 1.5 1.5 1.4-.6q.55.43 1.2.7L6.9 15h2.2l.2-1.5q.65-.27 1.2-.7l1.4.6 1.5-1.5-.6-1.4q.43-.55.7-1.2L15 9.1V6.9l-1.5-.2a5.4 5.4 0 0 0-.7-1.2l.6-1.4-1.5-1.5-1.4.6a5.4 5.4 0 0 0-1.2-.7L9.1 1z" fill="none" stroke="currentColor" stroke-width="1.1"/>');
 
   const CSS_TEXT = `
     :host { all: initial; display:block; height:100%; }
@@ -193,6 +267,24 @@
            border:none; background:none; border-radius:4px; cursor:pointer; color:#b4b4b4; padding:0; }
     .ico:hover { background:#dbe9f6; color:#0572ce; }
     .ico.on { color:#c74634; }
+    .ico.on:hover { background:#f7e2df; color:#c74634; }
+    .row.pinned { cursor:grab; }
+    .row.pinned.dragging { opacity:.4; }
+    .row.dropbefore { box-shadow: inset 0 2px 0 0 #0572ce; }
+    .row.dropafter  { box-shadow: inset 0 -2px 0 0 #0572ce; }
+    .grip { flex:none; width:9px; color:#c9c9c9; font-size:11px; line-height:1; letter-spacing:-1px; user-select:none; }
+    .badge { flex:none; font-size:10px; padding:1px 5px; border-radius:9px; background:#e2eefa; color:#0a5aa0; white-space:nowrap; }
+    .modal { position:absolute; inset:0; background:rgba(255,255,255,.97); display:flex; flex-direction:column;
+             gap:12px; padding:14px; z-index:20; }
+    .modal h3 { margin:0; font-size:13px; font-weight:700; }
+    .modal h3 span { display:block; font-weight:400; font-size:11px; color:#6b6b6b; margin-top:2px; }
+    .field { display:flex; flex-direction:column; gap:4px; }
+    .field label { font-size:11px; font-weight:600; color:#4a4a4a; }
+    .field input, .field select { padding:6px 8px; font-size:13px; border:1px solid #9a9a9a; border-radius:4px; }
+    .field .hint { font-size:10px; color:#7a7a7a; }
+    .btns { margin-top:auto; display:flex; gap:8px; justify-content:flex-end; }
+    .btn { padding:6px 14px; font-size:12px; border-radius:4px; border:1px solid #9a9a9a; background:#fff; cursor:pointer; }
+    .btn.primary { background:#0572ce; border-color:#0572ce; color:#fff; }
     .aliasEdit { flex:1; font-size:12px; padding:4px 6px; border:1px solid #0572ce; border-radius:3px; outline:none; }
     .empty { padding:14px 10px; font-size:12px; color:#6b6b6b; text-align:center; }
     .foot { font-size:10px; color:#8a8a8a; display:flex; justify-content:space-between; }
@@ -206,6 +298,15 @@
       .row.active { background:#334a63; }
       .row .sub { color:#a0a0a0; }
       .ico:hover { background:#44566b; }
+      .ico.on:hover { background:#5a3f3a; }
+      .grip { color:#5a5a5a; }
+      .badge { background:#334a63; color:#cfe3f7; }
+      .modal { background:rgba(31,31,31,.98); }
+      .modal h3 span, .field .hint { color:#a0a0a0; }
+      .field label { color:#c9c9c9; }
+      .field input, .field select { background:#2b2b2b; border-color:#555; color:#e8e8e8; }
+      .btn { background:#2b2b2b; border-color:#555; color:#e8e8e8; }
+      .btn.primary { background:#0572ce; border-color:#0572ce; color:#fff; }
     }`;
 
   // Subsequence ("fuzzy") match — "apdev1" matches "ap01.dev.us-ashburn-1". Returns the
@@ -282,31 +383,129 @@
           list.append(h);
           lastPinned = it.pinned;
         }
-        const label = it.alias || it.c.name;
         const sub = it.alias ? it.c.name : ctx.pathOf(it.c);
+        const region = (state.prefs.settings[it.c.id] || {}).region || '';
         const row = document.createElement('div');
-        row.className = 'row' + (idx === cursor ? ' cursor' : '') + (it.c.id === ctx.activeId ? ' active' : '');
+        row.className = 'row' + (it.pinned ? ' pinned' : '') + (idx === cursor ? ' cursor' : '')
+                      + (it.c.id === ctx.activeId ? ' active' : '');
+        row.dataset.id = it.c.id;
+        // Only pinned rows are draggable — the unpinned section is alphabetical, so there is
+        // no order there to rearrange.
+        if (it.pinned) row.draggable = true;
         row.innerHTML = `
-          <button class="ico pin${it.pinned ? ' on' : ''}" title="${it.pinned ? 'Unpin' : 'Pin to top'}">${ICON_PIN}</button>
+          ${it.pinned ? '<span class="grip" aria-hidden="true">⠿</span>' : ''}
+          <button class="ico pin${it.pinned ? ' on' : ''}" title="${it.pinned ? 'Unpin' : 'Pin to top'}">${it.pinned ? ICON_PIN_ON : ICON_PIN_OFF}</button>
           <div class="txt">
             <div class="name">${it.alias ? mark(it.alias, it.hitsAlias) : mark(it.c.name, it.hitsName)}</div>
             ${sub ? `<div class="sub">${escapeHtml(sub)}</div>` : ''}
           </div>
-          ${it.pinned ? `<button class="ico alias" title="Set alias">${ICON_ALIAS}</button>` : ''}`;
+          ${region ? `<span class="badge" title="Switches to this region">${escapeHtml(region)}</span>` : ''}
+          ${it.pinned ? `<button class="ico alias" title="Rename (alias)">${ICON_ALIAS}</button>
+                         <button class="ico gear" title="Compartment settings">${ICON_GEAR}</button>` : ''}`;
 
         row.addEventListener('click', (e) => {
           if (e.target.closest('.pin')) { e.stopPropagation(); togglePin(it.c.id); return; }
           if (e.target.closest('.alias')) { e.stopPropagation(); editAlias(row, it); return; }
+          if (e.target.closest('.gear')) { e.stopPropagation(); openSettings(it); return; }
           choose(it.c);
         });
+        if (it.pinned) attachDrag(row);
         list.append(row);
       });
       wrap.querySelector('.count').textContent = `${scored.length} of ${ctx.comps.length}`;
     }
 
+    // ---- drag-to-reorder (pinned rows only) -------------------------------
+    // HTML5 DnD inside the shadow root. The drop target is decided by which half of the
+    // hovered row the pointer is in, so a pin can be dropped either side of any other.
+    let dragId = null;
+    function clearDropMarks() {
+      for (const r of list.querySelectorAll('.dropbefore, .dropafter')) r.classList.remove('dropbefore', 'dropafter');
+    }
+    function attachDrag(row) {
+      row.addEventListener('dragstart', (e) => {
+        dragId = row.dataset.id;
+        row.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        // Firefox/Chrome both need *something* set or the drag never starts.
+        e.dataTransfer.setData('text/plain', dragId);
+      });
+      row.addEventListener('dragend', () => { row.classList.remove('dragging'); clearDropMarks(); dragId = null; });
+      row.addEventListener('dragover', (e) => {
+        if (!dragId || dragId === row.dataset.id) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        const r = row.getBoundingClientRect();
+        const after = e.clientY > r.top + r.height / 2;
+        clearDropMarks();
+        row.classList.add(after ? 'dropafter' : 'dropbefore');
+      });
+      row.addEventListener('drop', async (e) => {
+        if (!dragId || dragId === row.dataset.id) return;
+        e.preventDefault(); e.stopPropagation();
+        const after = row.classList.contains('dropafter');
+        clearDropMarks();
+        const pins = state.prefs.pinned;
+        const from = pins.indexOf(dragId);
+        if (from < 0) return;
+        pins.splice(from, 1);
+        let to = pins.indexOf(row.dataset.id);
+        if (to < 0) return;
+        pins.splice(after ? to + 1 : to, 0, dragId);
+        dragId = null;
+        await savePrefs(ctx.tenant, state.prefs);
+        render();
+      });
+    }
+
+    // ---- per-compartment settings modal -----------------------------------
+    function openSettings(it) {
+      const cur = state.prefs.settings[it.c.id] || {};
+      const modal = document.createElement('div');
+      modal.className = 'modal';
+      const opts = ['<option value="">(use the default region)</option>']
+        .concat(ctx.regions.map((r) =>
+          `<option value="${escapeHtml(r.name)}"${r.name === cur.region ? ' selected' : ''}>${escapeHtml(r.label || r.name)}</option>`))
+        .join('');
+      modal.innerHTML = `
+        <h3>Compartment settings<span>${escapeHtml(it.alias ? `${it.alias} — ${it.c.name}` : it.c.name)}</span></h3>
+        <div class="field">
+          <label for="ox-alias">Alias</label>
+          <input id="ox-alias" type="text" value="${escapeHtml(it.alias || '')}" placeholder="${escapeHtml(it.c.name)}" spellcheck="false">
+          <span class="hint">Shown instead of the compartment name, and searchable.</span>
+        </div>
+        <div class="field">
+          <label for="ox-region">Region</label>
+          <select id="ox-region">${opts}</select>
+          <span class="hint">Selecting this compartment also switches the console to this region.
+            Compartments without one switch back to the default.</span>
+        </div>
+        <div class="btns">
+          <button class="btn cancel" type="button">Cancel</button>
+          <button class="btn primary save" type="button">Save</button>
+        </div>`;
+      sr.querySelector('.wrap').append(modal);
+      const close = () => { modal.remove(); search.focus(); };
+      modal.querySelector('.cancel').addEventListener('click', close);
+      modal.querySelector('.save').addEventListener('click', async () => {
+        const alias = modal.querySelector('#ox-alias').value.trim();
+        const region = modal.querySelector('#ox-region').value;
+        if (alias && alias !== it.c.name) state.prefs.aliases[it.c.id] = alias; else delete state.prefs.aliases[it.c.id];
+        if (region) state.prefs.settings[it.c.id] = { ...cur, region }; else delete state.prefs.settings[it.c.id];
+        await savePrefs(ctx.tenant, state.prefs);
+        close(); render();
+      });
+      modal.addEventListener('keydown', (e) => {
+        e.stopPropagation();
+        if (e.key === 'Escape') close();
+        else if (e.key === 'Enter' && e.target.tagName !== 'BUTTON') modal.querySelector('.save').click();
+      });
+      modal.querySelector('#ox-alias').focus();
+    }
+
     async function togglePin(id) {
       const i = state.prefs.pinned.indexOf(id);
-      if (i >= 0) { state.prefs.pinned.splice(i, 1); delete state.prefs.aliases[id]; }
+      if (i >= 0) { state.prefs.pinned.splice(i, 1); delete state.prefs.aliases[id]; delete state.prefs.settings[id]; }
       else state.prefs.pinned.unshift(id);
       await savePrefs(ctx.tenant, state.prefs);
       render();
@@ -345,7 +544,18 @@
         // Give the user the native picker back rather than stranding them.
         list.innerHTML = '<div class="empty">Could not apply that compartment — restoring the standard picker.</div>';
         restoreNative(menu);
+        return;
       }
+      // Region follows the compartment — but only for a tenancy where the user has actually
+      // pinned a region to at least one compartment. Otherwise selecting a compartment would
+      // start yanking the region around for people who never asked for the feature.
+      const pinnedRegion = (state.prefs.settings[c.id] || {}).region || '';
+      const anyRegionPinned = Object.values(state.prefs.settings).some((v) => v && v.region);
+      if (!pinnedRegion && !anyRegionPinned) return;
+      const target = pinnedRegion || await defaultRegion();
+      if (!target) return;
+      list.innerHTML = `<div class="empty">Switching region to ${escapeHtml(target)}…</div>`;
+      await applyRegion(target, ctx.regions);
     }
 
     search.addEventListener('input', () => { cursor = 0; render(); });
@@ -409,6 +619,7 @@
     const byId = new Map(comps.map((c) => [c.id, c]));
     const ctx = {
       comps, tenant: state.tenant,
+      regions: cached?.regions?.length ? cached.regions : [],
       pathOf: (c) => pathOf(c, byId),
       activeId: comps.find((c) => c.name === activeName)?.id || null,
     };

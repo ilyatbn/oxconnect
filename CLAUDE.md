@@ -291,12 +291,48 @@ compartments**. `loadFromCache()` resolves the active tenancy by (1) the tenancy
 `activeCompartmentId` resolves to the compartment currently on the chip, else (2) the newest
 `lastUserActivity`.
 
+**Pins.** Pinned rows are draggable (HTML5 DnD inside the shadow root; the drop side is
+decided by which half of the hovered row the pointer is in) and reorder `prefs.pinned`
+directly. They render a **solid** pin in the accent colour plus a drag grip, against a
+**hollow outline** pin for unpinned rows — the states differ in shape, not just shade.
+
+**Per-compartment settings** (gear icon, pinned rows only) open a modal over the panel with
+the alias and a **region** dropdown, sourced from the tenancy's own `subscribed-regions`
+(in `duplo`), since a tenancy can only be used in regions it is subscribed to.
+
+### Region: where the console keeps it, and how a compartment can carry one
+
+Traced by diffing **all** browser state across a region switch (`scripts/region-trace.js`).
+**No cookie is involved** — which is why deleting the `?region=` query param just gets it
+re-added. The switch changes exactly:
+
+| where | before → after |
+|-------|----------------|
+| `sessionStorage.region` | `<regionA>` → `<regionB>` (region **name**, per tab) |
+| `sessionStorage.activeRegionId` | `IAD` → `FRA` (region **key**) |
+| `duplo` `<tenantName>/<userOcid>` → `activeRegionId` | `IAD` → `FRA` (**durable** — this is the one that survives reloads) |
+| `duplo` `capability/<tenancyOcid>::<region>`, `compartments/…::<region>` | new per-region caches appear lazily |
+
+Writing those by hand would leave the SPA's in-memory state stale, so — same philosophy as
+compartment selection — `applyRegion()` drives the console's **own** region menu:
+`#region-menu-button` and `.region-selector a.dropmenu__option-item`, matched on the region's
+friendly label. Two gotchas: that menu is in the **top frame**, not the sandbox iframe the
+picker runs in (both are `cloud.oracle.com`, so `window.top.document` is reachable); and its
+anchors **stay in the DOM while the menu is closed**, so "is it open?" must be
+`offsetParent !== null` — clicking the button blindly would toggle an open menu shut.
+
+Selecting a compartment applies the compartment first, then the region (a region switch is a
+full navigation, and `activeCompartmentId` persists through it). A compartment with no pinned
+region falls back to the extension's **Discovery region** setting — but *only* in a tenancy
+where at least one compartment has a region pinned, so the feature never moves the region for
+someone who has not opted into it.
+
 **UI.** Fuzzy match is a plain **subsequence** test over the alias *and* the name (`aprod1`
 → `<a>pp01.<pro>d.us-ashburn-<1>`), with matched characters bolded. Pinned rows sort first in pin
 order, the rest alphabetically; the secondary line is the parent path (the tenancy root is
 its own parent — walking must stop there, and it is omitted as noise) or, for aliased rows,
-the real compartment name. `↑`/`↓`/`Enter` work from the search box. Pins/aliases are stored
-per tenancy in `compartmentPrefs`; unpinning also clears the alias. If selection ever fails,
+the real compartment name. `↑`/`↓`/`Enter` work from the search box. Pins/aliases/settings are stored
+per tenancy in `compartmentPrefs`; unpinning also clears that compartment's alias and settings. If selection ever fails,
 the panel removes itself and hands back the standard picker.
 
 Adv settings: `customCompartmentPicker`, `compartmentPickerWidth`, `compartmentPickerMaxHeight`,
@@ -312,7 +348,7 @@ Adv settings: `customCompartmentPicker`, `compartmentPickerWidth`, `compartmentP
 | `pendingRestore` | `{ targetTabId, region, parked:[{tabId,url}], createdAt }` — tabs parked on `about:blank` during a switch, restored once the new login lands |
 | `serviceCatalog` | `{ builtAt, region, items:[{ name, group, path }] }` — scraped service catalog for search |
 | `searchAliases` | `[{ alias, phrase }]` — user search aliases (merged over built-in `DEFAULT_ALIASES`) |
-| `compartmentPrefs` | `{ <tenantName>: { pinned:[<compartmentOcid>], aliases:{ <compartmentOcid>: "<alias>" } } }` — custom compartment picker |
+| `compartmentPrefs` | `{ <tenantName>: { pinned:[<compartmentOcid>], aliases:{ <compartmentOcid>: "<alias>" }, settings:{ <compartmentOcid>: { region } } } }` — custom compartment picker (pin order is the array order) |
 | `advSettings` | `{ <key>: value }` — overrides for `adv_settings.js` tunables (missing key → its default) |
 
 ---
@@ -378,6 +414,8 @@ hold captured tokens/session **and real account values**). They drive **real Chr
 | `scripts/ext-switch-test.js` | Drives the **real** extension `switchTo()` over CDP and reports whether the prefs survived | stdout |
 | `scripts/comp-lib.js` | Shared CDP helpers for the compartment picker (attach + toggle-aware `reopen()`) | — |
 | `scripts/comp-poc.js` | Proved selection can be driven headlessly through the native picker (search → click) | stdout |
+| `scripts/region-trace.js` | `snap <label>` / `diff <a> <b>` — snapshots cookies + localStorage + sessionStorage + `duplo` and diffs; used to prove the active region is in storage, never a cookie | `scripts/region-<label>.json` |
+| `scripts/comp-v2.js` | Tests pin icons, drag-reorder, the settings modal and region-follows-compartment | stdout |
 | `scripts/comp-func.js` | End-to-end test: render → fuzzy search → pin → alias → search-by-alias → select | stdout |
 | `scripts/relaunch-brave.js` | Kill + relaunch Brave with the unpacked extension and wait for the SW (manifest / content-script edits need a real extension reload, and the MV3 worker idles out so `reload-ext.js` often can't attach) | — |
 | `scripts/capture-services.js` | Service-search Step-0: connects to the open browser over CDP, finds the services-page data source. Established: the list is built client-side (no API) and rendered in the `sandbox-maui-preact-container` iframe, paginated; scrape it. | `scripts/capture-services.{log,html}` |
