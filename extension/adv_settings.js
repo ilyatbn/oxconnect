@@ -19,9 +19,25 @@ self.ADV_SETTINGS = [
     ],
     desc: 'Auto follows the OS dark/light setting; override here if detection picks the wrong icon.' },
 
+  // ---- Session clearing ----
+  { key: 'preserveConsolePrefs', group: 'Session clearing', label: 'Preserve console preferences', type: 'bool', default: true,
+    desc: 'Keep the console\'s per-tenancy preferences (selected compartment, "browser not supported" dismissal, pinned items, locale) across a switch. They live in the `duplo` IndexedDB, namespaced per tenancy, so sparing it is safe; the auth-bearing databases are still wiped. Turn off to wipe all site storage (the old behaviour) if a switch misbehaves.' },
+  { key: 'prefsTabTimeoutMs', group: 'Session clearing', label: 'Prefs tab timeout (ms)', type: 'number', min: 1000, step: 500, default: 8000,
+    desc: 'How long to wait for the throwaway same-origin tab used to do the selective IndexedDB wipe. On timeout the switch falls back to wiping all site storage.' },
+
   // ---- Tab restore ----
   { key: 'restoreDelayMs', group: 'Tab restore', label: 'Restore delay (ms)', type: 'number', min: 0, step: 500, default: 3000,
     desc: 'After the new tenant signs in, wait this long before reloading the tabs that were parked during the switch — lets the console settle so the concurrent load does not break it.' },
+
+  // ---- Compartment picker (experimental) ----
+  { key: 'customCompartmentPicker', group: 'Compartment picker', label: 'Custom compartment picker (experimental)', type: 'bool', default: false,
+    desc: 'Replace the console\'s compartment filter menu with a flat, searchable list where you can pin favourites to the top and give them aliases. Pins/aliases are stored per tenancy. Selection still goes through the console\'s own picker, so nothing downstream changes.' },
+  { key: 'compartmentPickerWidth', group: 'Compartment picker', label: 'Picker width (px)', type: 'number', min: 260, step: 20, default: 420,
+    desc: 'Minimum width of the replaced menu.' },
+  { key: 'compartmentPickerMaxHeight', group: 'Compartment picker', label: 'Picker list height (px)', type: 'number', min: 120, step: 20, default: 420,
+    desc: 'Maximum height of the compartment list before it scrolls.' },
+  { key: 'compartmentSelectTimeoutMs', group: 'Compartment picker', label: 'Select timeout (ms)', type: 'number', min: 1000, step: 500, default: 8000,
+    desc: 'How long to wait for the console\'s own tree to surface the chosen compartment after searching for it. On timeout the standard picker is restored.' },
 
   // ---- Service catalog build ----
   { key: 'catalogTabActive', group: 'Service catalog', label: 'Open build tab focused', type: 'bool', default: true,

@@ -115,17 +115,96 @@ async function clearOracleCookies() {
   return n;
 }
 
+// IndexedDB databases on cloud.oracle.com that must SURVIVE a switch.
+//
+// `duplo` is the console's preference store, and its object stores are namespaced per
+// tenancy + user (`<tenantName>/<userOcid>`, `personalization/<tenantName>/<userOcid>`, …),
+// so keeping it across a switch cannot leak one tenant's state into another. It holds the
+// things that were being needlessly destroyed on every switch:
+//   activeCompartmentId  ..............  the selected compartment
+//   unsupported-browser-popup-not-show-agin / -date  ..  the "Browser not supported"
+//                                        dismissal (the one-time popup on Brave)
+//   pinned, recentSearchKey, selectedLocale, activeRegionId, subscribed-regions
+//   personalization/…  ................  ~470 per-service UI preferences (table columns, …)
+// None of it is auth state — verified empirically: clearing cookies + localStorage + every
+// OTHER database still re-runs the full SAML login correctly, with these preferences intact.
+//
+// Everything else IS session state and is deleted: `opc-key-store-v2` (the ephemeral RSA
+// keypair the SPA mints for the oauth2 flow), `maui`, `telemetry-client`, `test`,
+// `console_feature_test_db`.
+const KEEP_IDB = ['duplo'];
+const CONSOLE_ORIGIN = 'https://cloud.oracle.com';
+
+// chrome.browsingData has no per-database granularity — indexedDB is all-or-nothing per
+// origin. So we do the console's IndexedDB half ourselves, from a page on that origin.
+//
+// The host page is `cloud.oracle.com/robots.txt`: a 24-byte 404, same origin, full
+// IndexedDB access — and crucially it does NOT boot the console SPA. (Any real path would
+// serve the SPA, which would immediately re-pin the old tenant's storage while we are
+// trying to clear it.) The tab is opened in the background and closed straight after.
+//
+// Returns the deleted database names, or null if anything went wrong — in which case the
+// caller falls back to the blanket wipe, trading the preferences for a correct clear.
+async function clearConsoleIdbExceptPrefs(timeoutMs) {
+  let tabId;
+  try {
+    const tab = await chrome.tabs.create({ url: `${CONSOLE_ORIGIN}/robots.txt`, active: false });
+    tabId = tab.id;
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const t = await chrome.tabs.get(tabId);
+      if (t.status === 'complete') break;
+      if (Date.now() > deadline) throw new Error('prefs tab load timeout');
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const [res] = await chrome.scripting.executeScript({
+      target: { tabId },
+      args: [KEEP_IDB],
+      func: async (keep) => {
+        const deleted = [];
+        for (const { name } of await indexedDB.databases()) {
+          if (!name || keep.includes(name)) continue;
+          // Resolve on blocked too: another (already-parked) tab holding a connection must
+          // not hang the switch — the delete completes once that connection drops.
+          await new Promise((r) => {
+            const req = indexedDB.deleteDatabase(name);
+            req.onsuccess = req.onerror = req.onblocked = () => r();
+          });
+          deleted.push(name);
+        }
+        return deleted;
+      },
+    });
+    if (!Array.isArray(res?.result)) throw new Error('no result from prefs tab');
+    return res.result;
+  } catch (e) {
+    console.warn('oxconnect: selective IndexedDB clear failed, falling back to full wipe', e);
+    return null;
+  } finally {
+    if (tabId !== undefined) await chrome.tabs.remove(tabId).catch(() => {});
+  }
+}
+
 async function clearOracleSession(target) {
+  const { preserveConsolePrefs, prefsTabTimeoutMs } = await advAll();
   const cookiesRemoved = await clearOracleCookies();
   const origins = storageOriginsFor(target);
-  await new Promise((resolve) =>
-    chrome.browsingData.remove(
-      { origins },
-      { localStorage: true, indexedDB: true, cacheStorage: true, serviceWorkers: true },
-      resolve
-    )
-  );
-  return { cookiesRemoved, origins };
+
+  // Try the surgical console wipe first; if it fails we just wipe cloud.oracle.com wholesale.
+  const idbDeleted = preserveConsolePrefs ? await clearConsoleIdbExceptPrefs(prefsTabTimeoutMs) : null;
+  const preserved = !!idbDeleted;
+
+  const wipe = (list, indexedDB) => new Promise((resolve) => {
+    if (!list.length) return resolve();
+    chrome.browsingData.remove({ origins: list },
+      { localStorage: true, indexedDB, cacheStorage: true, serviceWorkers: true }, resolve);
+  });
+  // cloud.oracle.com keeps its IndexedDB only when we already pruned it by hand above.
+  // Every other origin (login.*, the IDCS domain) is wiped whole either way.
+  await wipe(origins.filter((o) => o === CONSOLE_ORIGIN), !preserved);
+  await wipe(origins.filter((o) => o !== CONSOLE_ORIGIN), true);
+
+  return { cookiesRemoved, origins, prefsPreserved: preserved, idbDeleted };
 }
 
 // Build the console URL that skips the identity-domain picker WHILE letting the

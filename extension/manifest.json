@@ -37,6 +37,12 @@
       "matches": ["https://*.identity.oraclecloud.com/ui/v1/signin*"],
       "js": ["content.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://cloud.oracle.com/*"],
+      "js": ["adv_settings.js", "compartments.js"],
+      "run_at": "document_idle",
+      "all_frames": true
     }
   ]
 }

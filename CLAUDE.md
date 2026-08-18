@@ -100,6 +100,8 @@ can omit `&domain=` — they auto-forward.)
    - `chrome.browsingData.remove({origins:[…oracle origins…]}, {localStorage, indexedDB, cacheStorage, serviceWorkers})`.
      **Clearing cookies alone is NOT enough** — the SPA's localStorage/indexedDB
      pins the old tenant. You must clear both.
+   - …but **spare the `duplo` IndexedDB on `cloud.oracle.com`** — see *Preserving console
+     preferences* below. Auth lives in the other databases.
 1b. **Park every OTHER open Oracle tab on `about:blank` first** (`quiesceOracleTabs`).
    This is mandatory when >1 `cloud.oracle.com` tab is open: otherwise each background
    tab notices the session was cleared and **re-writes its old tenant's `_user_data`
@@ -119,6 +121,42 @@ can omit `&domain=` — they auto-forward.)
    (adv setting, default 3000) so the console finishes hydrating — reloading the parked
    tabs into that concurrent load breaks it. State lives in `pendingRestore` (storage), so
    it survives a service-worker restart.
+
+### Preserving console preferences across a switch
+
+Wiping `cloud.oracle.com` storage wholesale also destroyed the console's **per-tenancy
+preferences**, so every switch re-showed the one-time *"Browser not supported"* popup
+(on non-Chrome browsers) and reset the **selected compartment**.
+
+Those preferences are **not cookies and not localStorage** — they live in the
+**`duplo` IndexedDB** on `cloud.oracle.com`, in object stores namespaced per tenancy+user:
+
+| store | holds |
+|-------|-------|
+| `<tenantName>/<userOcid>` | `activeCompartmentId`, `unsupported-browser-popup-not-show-agin` (+ `-date`), `pinned`, `recentSearchKey`, `selectedLocale`, `activeRegionId`, `subscribed-regions` |
+| `personalization/<tenantName>/<userOcid>` | ~470 per-service UI prefs (table columns, saved filters, …) |
+| `capability/<tenancyOcid>`, `compartments/…`, `notifications/…` | per-tenancy caches |
+
+Because **every store is namespaced by tenancy**, keeping `duplo` across a switch cannot
+leak one tenant's state into another. The auth-bearing databases are separate and still
+deleted: **`opc-key-store-v2`** (the ephemeral RSA keypair the SPA mints for the oauth2
+flow), `maui`, `telemetry-client`, `test`, `console_feature_test_db`. Verified end-to-end:
+cookies + localStorage + those databases cleared, `duplo` kept → full SAML re-login
+completes normally with compartment + popup consent intact.
+
+**Mechanism (`clearConsoleIdbExceptPrefs` in background.js).** `chrome.browsingData` has no
+per-database granularity (indexedDB is all-or-nothing per origin), so the console's
+IndexedDB is pruned by hand from a page on that origin:
+
+- host page = **`https://cloud.oracle.com/robots.txt`** — a 24-byte 404: same origin, full
+  IndexedDB access, and it does **not** boot the console SPA. (Any real path serves the SPA,
+  which would re-pin the old tenant's storage while we're clearing it.) Opened as a
+  background tab, `chrome.scripting.executeScript`s the delete loop, closed immediately.
+- `deleteDatabase` resolves on `onblocked` too, so a lingering connection can't hang a switch.
+- `clearOracleSession` then splits the `browsingData.remove` in two: `cloud.oracle.com`
+  **without** `indexedDB`, every other origin **with** it.
+- Any failure → `null` → falls back to the old blanket wipe (a correct clear beats kept prefs).
+- Adv settings: **`preserveConsolePrefs`** (default on) and **`prefsTabTimeoutMs`** (8000).
 
 **Constraint:** one active tenant per browser profile (single shared origin).
 Switching logs out the previous tenant. True parallel sessions require separate
@@ -209,6 +247,61 @@ which OCI's search misses).
 - During a build, a red "please wait" bar is **injected into the opened tab**
   (`showBuildBanner`), since the popup closes when that tab takes focus.
 
+### Custom compartment picker (experimental; `settings`→adv `customCompartmentPicker`, default off)
+
+Replaces the console's compartment filter menu with a flat, fuzzy-searchable list where
+favourites can be **pinned to the top** and given **aliases**. Off by default.
+
+**How the native picker is built** (from inspecting the live console):
+
+| piece | selector |
+|-------|----------|
+| trigger chip | `.oj-oci-compartment-filter-control .oj-oci-filter-chip` — `role=button`, **toggles** the menu; `aria-label` = `Edit or change Compartment filter with <name> value` (the only reliable read of the current compartment) |
+| menu shell | `.oj-oci-filter-menu--form-container`, rendered into a floating layer under `#__root_layer_host` — **generic**, the same shell hosts other filter menus |
+| compartment marker | `.oj-oci-compartment-filter-control--compartment-select-container` — present only for the compartment filter, so it is the discriminator for hijacking |
+| list | `ul.oj-oci-treeview-list` › `li.oj-oci-treeview-item`, with the OCID in `id` / `data-test-id="oj-oci-treeview-item-content-<ocid>"` |
+
+The menu lives in the same-origin **`sandbox-maui-preact-container` iframe**, so `compartments.js`
+is registered with `all_frames: true`.
+
+**Selection drives the native picker rather than reimplementing it.** The tree is *lazy* —
+only expanded branches exist in the DOM, so an arbitrary compartment usually has no row to
+click. Instead: write the compartment name into their search input (through the native
+`HTMLInputElement.value` setter + an `input` event, since it is preact-controlled) → their
+tree re-renders with the match and its ancestors expanded → dispatch a real
+`pointerdown/mousedown/pointerup/mouseup/click` on the matching row. Their own handler
+applies it, so the URL, reload and `activeCompartmentId` persistence all behave normally.
+
+⚠️ **The native picker must be covered, not moved or hidden.** `display:none` stops it laying
+out, and relocating it into an off-screen container makes its tree render **zero rows**
+(measured — the list is viewport-driven, so nothing off-screen materialises and there is no
+row left to click). `coverNative()` therefore leaves it in flow and paints the oxconnect
+panel over it as an `position:absolute; inset:0` overlay in a **shadow root** (so console CSS
+can't bleed in either direction).
+
+**Data source: the console's own cache** — IndexedDB `duplo`, store
+`compartments/<tenantName>/<userOcid>`, one entry per region → a flat array of
+`{ id, compartmentId (parent), name, description, lifecycleState }`. Falls back to scraping
+whatever rows the native tree has rendered if the cache is missing.
+
+⚠️ **`duplo` holds one set of stores PER TENANCY**, and oxconnect deliberately keeps that
+database across a switch (see *Preserving console preferences*) — so after the first switch
+several tenancies' caches coexist and taking the first store shows **the wrong tenancy's
+compartments**. `loadFromCache()` resolves the active tenancy by (1) the tenancy whose stored
+`activeCompartmentId` resolves to the compartment currently on the chip, else (2) the newest
+`lastUserActivity`.
+
+**UI.** Fuzzy match is a plain **subsequence** test over the alias *and* the name (`aprod1`
+→ `<a>pp01.<pro>d.us-ashburn-<1>`), with matched characters bolded. Pinned rows sort first in pin
+order, the rest alphabetically; the secondary line is the parent path (the tenancy root is
+its own parent — walking must stop there, and it is omitted as noise) or, for aliased rows,
+the real compartment name. `↑`/`↓`/`Enter` work from the search box. Pins/aliases are stored
+per tenancy in `compartmentPrefs`; unpinning also clears the alias. If selection ever fails,
+the panel removes itself and hands back the standard picker.
+
+Adv settings: `customCompartmentPicker`, `compartmentPickerWidth`, `compartmentPickerMaxHeight`,
+`compartmentSelectTimeoutMs`.
+
 ### `chrome.storage.local` keys
 | key | shape |
 |-----|-------|
@@ -219,6 +312,7 @@ which OCI's search misses).
 | `pendingRestore` | `{ targetTabId, region, parked:[{tabId,url}], createdAt }` — tabs parked on `about:blank` during a switch, restored once the new login lands |
 | `serviceCatalog` | `{ builtAt, region, items:[{ name, group, path }] }` — scraped service catalog for search |
 | `searchAliases` | `[{ alias, phrase }]` — user search aliases (merged over built-in `DEFAULT_ALIASES`) |
+| `compartmentPrefs` | `{ <tenantName>: { pinned:[<compartmentOcid>], aliases:{ <compartmentOcid>: "<alias>" } } }` — custom compartment picker |
 | `advSettings` | `{ <key>: value }` — overrides for `adv_settings.js` tunables (missing key → its default) |
 
 ---
@@ -237,6 +331,8 @@ extension/
 ├─ adv_settings.js single source of truth for tunable timeouts/toggles (+ defaults);
 │                  shared by the SW (importScripts) and popup (<script>); see below
 ├─ content.js      optional auto-click of the SAML/SSO button on the IDCS signin page
+├─ compartments.js custom compartment picker (pin / alias / fuzzy search) — content script on
+│                  cloud.oracle.com, all_frames (the menu lives in the sandbox iframe)
 ├─ offscreen.html/js  reads prefers-color-scheme (matchMedia, unavailable in the SW) and
 │                  reports it so the toolbar icon swaps light/dark
 ├─ vendor/fuse.js  vendored Fuse.js (UMD, global Fuse) for service-search fuzzy matching
@@ -276,6 +372,14 @@ hold captured tokens/session **and real account values**). They drive **real Chr
 | `scripts/bypass.js`      | Dumps `/v2/domains` JSON; showed direct IDCS-authorize reaches signin (but see below) | `scripts/bypass.log` |
 | `scripts/bypass2.js`     | Found the picker-skip that PRESERVES server `state`: `?tenant=X&domain=<name>` (direct IDCS-authorize breaks login with "Invalid Parameter") | `scripts/bypass2.log` |
 | `scripts/open-console.js` | Opens Chrome with CDP (:9222) deep-linked to a tenant and idles, so you can log in for the captures below | — |
+| `scripts/prefs.js` | `snap <label>` / `diff <a> <b>` — snapshots cookies + localStorage + sessionStorage over CDP and diffs two snapshots; used to prove the compartment / browser-popup prefs are in **neither** | `scripts/prefs-<label>.json` |
+| `scripts/prefs-test.js` | Simulates `clearOracleSession()` but spares `duplo`, then re-logs-in and asserts the prefs survived | stdout |
+| `scripts/open-brave-ext.js` | Launches Brave with the unpacked extension loaded + CDP :9222 | — |
+| `scripts/ext-switch-test.js` | Drives the **real** extension `switchTo()` over CDP and reports whether the prefs survived | stdout |
+| `scripts/comp-lib.js` | Shared CDP helpers for the compartment picker (attach + toggle-aware `reopen()`) | — |
+| `scripts/comp-poc.js` | Proved selection can be driven headlessly through the native picker (search → click) | stdout |
+| `scripts/comp-func.js` | End-to-end test: render → fuzzy search → pin → alias → search-by-alias → select | stdout |
+| `scripts/relaunch-brave.js` | Kill + relaunch Brave with the unpacked extension and wait for the SW (manifest / content-script edits need a real extension reload, and the MV3 worker idles out so `reload-ext.js` often can't attach) | — |
 | `scripts/capture-services.js` | Service-search Step-0: connects to the open browser over CDP, finds the services-page data source. Established: the list is built client-side (no API) and rendered in the `sandbox-maui-preact-container` iframe, paginated; scrape it. | `scripts/capture-services.{log,html}` |
 
 To learn a tenancy's identity domains: call

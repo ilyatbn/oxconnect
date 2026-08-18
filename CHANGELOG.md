@@ -1,3 +1,8 @@
+0.1.5
+-----
+- keep some settings between refreshes, like unsupported browser toggles, and your selected compartment per account
+- added experimental feature for compartment selection ui override. 
+
 0.1.4
 -----
 - removed keep-alive feature.
