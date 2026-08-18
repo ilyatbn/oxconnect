@@ -32,6 +32,10 @@ self.ADV_SETTINGS = [
   // ---- Compartment picker (experimental) ----
   { key: 'customCompartmentPicker', group: 'Compartment picker', label: 'Custom compartment picker (experimental)', type: 'bool', default: false,
     desc: 'Replace the console\'s compartment filter menu with a flat, searchable list where you can pin favourites to the top and give them aliases. Pins/aliases are stored per tenancy. Selection still goes through the console\'s own picker, so nothing downstream changes.' },
+  { key: 'compartmentFollowsRegion', group: 'Compartment picker', label: 'Switching region jumps to its pinned compartment', type: 'bool', default: true,
+    desc: 'The reverse of a compartment\'s pinned region: when you change region from the console\'s own region menu, jump to the first pinned compartment (in pin order) mapped to that region. Does nothing if no pinned compartment claims the region.' },
+  { key: 'compartmentResetRegion', group: 'Compartment picker', label: 'Unpinned compartments reset the region', type: 'bool', default: false,
+    desc: 'When on, selecting a compartment that has NO pinned region switches the console back to the Discovery region. Off by default: with it on, a single region pin anywhere means every ordinary compartment click drags you out of the region you were working in.' },
   { key: 'compartmentPickerWidth', group: 'Compartment picker', label: 'Picker width (px)', type: 'number', min: 260, step: 20, default: 420,
     desc: 'Minimum width of the replaced menu.' },
   { key: 'compartmentPickerMaxHeight', group: 'Compartment picker', label: 'Picker list height (px)', type: 'number', min: 120, step: 20, default: 420,

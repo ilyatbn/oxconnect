@@ -300,43 +300,72 @@ directly. They render a **solid** pin in the accent colour plus a drag grip, aga
 the alias and a **region** dropdown, sourced from the tenancy's own `subscribed-regions`
 (in `duplo`), since a tenancy can only be used in regions it is subscribed to.
 
-### Region: where the console keeps it, and how a compartment can carry one
+### Region ↔ compartment
 
-Traced by diffing **all** browser state across a region switch (`scripts/region-trace.js`).
-**No cookie is involved** — which is why deleting the `?region=` query param just gets it
-re-added. The switch changes exactly:
+Traced by diffing **all** browser state across a region switch (`scripts/region-trace.js`) and
+by direct experiment (`scripts/comp-storage-probe*.js`, `scripts/region-nav-probe.js`):
 
-| where | before → after |
-|-------|----------------|
-| `sessionStorage.region` | `<regionA>` → `<regionB>` (region **name**, per tab) |
-| `sessionStorage.activeRegionId` | `IAD` → `FRA` (region **key**) |
-| `duplo` `<tenantName>/<userOcid>` → `activeRegionId` | `IAD` → `FRA` (**durable** — this is the one that survives reloads) |
-| `duplo` `capability/<tenancyOcid>::<region>`, `compartments/…::<region>` | new per-region caches appear lazily |
+| question | answer |
+|----------|--------|
+| where is the active **region**? | `sessionStorage.region` (name) + `sessionStorage.activeRegionId` (`IAD`) + **durably** `duplo` `<tenantName>/<userOcid>` → `activeRegionId`. **No cookie** — which is why deleting the `?region=` param just gets it re-added. |
+| where is the active **compartment**? | `sessionStorage.activeCompartmentId` + `duplo` `<tenantName>/<userOcid>` → `activeCompartmentId`. Writing both and loading the page is **authoritative** — the console adopts it with no picker involved. |
+| do URL params work? | Yes. `?region=<name>` and `?compartmentId=<ocid>` both apply, on the same load. |
+| is a region switch a page load? | **No — an SPA route change.** Verified: a marker planted on `window` survives it. So the SPA keeps its in-memory compartment and never re-reads storage mid-switch, and the content script is never re-injected. |
 
-Writing those by hand would leave the SPA's in-memory state stale, so — same philosophy as
-compartment selection — `applyRegion()` drives the console's **own** region menu:
-`#region-menu-button` and `.region-selector a.dropmenu__option-item`, matched on the region's
-friendly label. Two gotchas: that menu is in the **top frame**, not the sandbox iframe the
-picker runs in (both are `cloud.oracle.com`, so `window.top.document` is reachable); and its
-anchors **stay in the DOM while the menu is closed**, so "is it open?" must be
-`offsetParent !== null` — clicking the button blindly would toggle an open menu shut.
+That last row rules out the obvious designs (write the compartment and let the click through;
+or record something and finish after the reload — there is no reload). What works is to
+**intercept the region click and do one real navigation carrying both parameters**:
 
-Selecting a compartment applies the compartment first, then the region (a region switch is a
-full navigation, and `activeCompartmentId` persists through it). A compartment with no pinned
-region falls back to the extension's **Discovery region** setting — but *only* in a tenancy
-where at least one compartment has a region pinned, so the feature never moves the region for
-someone who has not opted into it.
+- `installRegionHook()` (top frame only — that is where the region menu lives) listens on
+  `click` **capture**. Every input it needs is synchronous, so `preventDefault()` +
+  `stopImmediatePropagation()` happen before any `await`; an async handler here resolves only
+  after the SPA has already started routing.
+- It then writes the console's own compartment state (`writeActiveCompartment`) and navigates
+  to `<path>?region=<r>&compartmentId=<ocid>`. **The compartment picker is never touched.**
+- No pin for that region → the handler returns without preventing anything, and the console
+  switches region exactly as it normally would.
+
+**Pin storage — `localStorage`, one entry per (tenancy, region).** The hook's decision must be
+made synchronously inside the click handler, which rules out `chrome.storage`. Key
+`oxc.rp.<obfuscated "<tenant>:<region>">`, value the obfuscated compartment OCID; pinning a
+second compartment to a region simply replaces the entry, so a region always resolves to the
+**most recently pinned** compartment. ⚠️ The obfuscation is XOR+base64 — it keeps tenancy and
+compartment OCIDs out of cleartext in a shared origin's localStorage and is **not** a security
+control; anyone with the code reverses it.
+
+⚠️ This origin's localStorage is wiped by the extension's **own** tenant switch, which would
+take every pin with it — so every write is mirrored to `chrome.storage.local`
+(`compartmentRegionPins`) and `rehydratePins()` restores it on load.
+
+⚠️ **A subframe cannot navigate the top frame here.** The picker runs inside the console's
+**sandboxed** `sandbox-maui-preact-container` iframe, so `top.location.assign()` throws
+*"The current window does not have permission to navigate the target frame"* (reading
+`top.location` is fine — only navigation is blocked). `navigateTop()` therefore asks the
+service worker to drive the tab (`navigateTab` message → `chrome.tabs.update`, restricted to
+`cloud.oracle.com` URLs so it cannot be used as an open redirect). The region hook runs in the
+**top** frame, where the direct call works.
+
+Selecting a compartment **from the picker** uses that same single-navigation path when the
+chosen compartment carries a pinned region; otherwise it drives the console's own tree, which
+applies without a reload and leaves the region alone. There is deliberately **no** fallback of
+"unpinned compartment → reset to the default region": with it on, a single pin anywhere means
+every ordinary compartment click drags you out of the region you were working in. That is
+available as the opt-in adv setting **`compartmentResetRegion`** (default off).
 
 **UI.** Fuzzy match is a plain **subsequence** test over the alias *and* the name (`aprod1`
 → `<a>pp01.<pro>d.us-ashburn-<1>`), with matched characters bolded. Pinned rows sort first in pin
 order, the rest alphabetically; the secondary line is the parent path (the tenancy root is
 its own parent — walking must stop there, and it is omitted as noise) or, for aliased rows,
-the real compartment name. `↑`/`↓`/`Enter` work from the search box. Pins/aliases/settings are stored
+the real compartment name. `↑`/`↓`/`Enter` work from the search box, but the cursor is **not painted until it exists** —
+either a query has been typed (Enter takes the top hit) or an arrow has been pressed. Painting
+it on open highlighted the first row for no reason, which reads as "this one is selected". For
+the same reason the **active** compartment is marked with an accent bar and a bolder name, not
+just a slightly different tint (a pseudo-element, since the drag-drop markers use box-shadow). Pins/aliases/settings are stored
 per tenancy in `compartmentPrefs`; unpinning also clears that compartment's alias and settings. If selection ever fails,
 the panel removes itself and hands back the standard picker.
 
-Adv settings: `customCompartmentPicker`, `compartmentPickerWidth`, `compartmentPickerMaxHeight`,
-`compartmentSelectTimeoutMs`.
+Adv settings: `customCompartmentPicker`, `compartmentFollowsRegion`, `compartmentResetRegion`,
+`compartmentPickerWidth`, `compartmentPickerMaxHeight`, `compartmentSelectTimeoutMs`.
 
 ### `chrome.storage.local` keys
 | key | shape |
@@ -348,6 +377,7 @@ Adv settings: `customCompartmentPicker`, `compartmentPickerWidth`, `compartmentP
 | `pendingRestore` | `{ targetTabId, region, parked:[{tabId,url}], createdAt }` — tabs parked on `about:blank` during a switch, restored once the new login lands |
 | `serviceCatalog` | `{ builtAt, region, items:[{ name, group, path }] }` — scraped service catalog for search |
 | `searchAliases` | `[{ alias, phrase }]` — user search aliases (merged over built-in `DEFAULT_ALIASES`) |
+| `compartmentRegionPins` | `{ "<tenantName>:<region>": "<compartmentOcid>" }` — durable mirror of the localStorage region pins (this origin's localStorage does not survive a tenant switch) |
 | `compartmentPrefs` | `{ <tenantName>: { pinned:[<compartmentOcid>], aliases:{ <compartmentOcid>: "<alias>" }, settings:{ <compartmentOcid>: { region } } } }` — custom compartment picker (pin order is the array order) |
 | `advSettings` | `{ <key>: value }` — overrides for `adv_settings.js` tunables (missing key → its default) |
 
@@ -414,6 +444,11 @@ hold captured tokens/session **and real account values**). They drive **real Chr
 | `scripts/ext-switch-test.js` | Drives the **real** extension `switchTo()` over CDP and reports whether the prefs survived | stdout |
 | `scripts/comp-lib.js` | Shared CDP helpers for the compartment picker (attach + toggle-aware `reopen()`) | — |
 | `scripts/comp-poc.js` | Proved selection can be driven headlessly through the native picker (search → click) | stdout |
+| `scripts/comp-storage-probe.js`, `scripts/comp-storage-probe2.js` | Prove what actually sets the active compartment: a `?compartmentId=` URL param, and writing `sessionStorage` + `duplo` then loading | stdout |
+| `scripts/region-nav-probe.js` | Proves a region switch is an SPA route change, not a document load (a `window` marker survives it) | stdout |
+| `scripts/comp-picker-check.js` | Regression check for picker selection itself: unpinned compartment applies in place without moving the region; a pinned one navigates once carrying both | stdout |
+| `scripts/comp-reverse3.js` | Non-destructive reverse check: move off the pinned compartment, leave the region, come back, confirm it is restored | stdout |
+| `scripts/comp-v3.js`, `scripts/comp-v3b.js` | End-to-end: pin a compartment to a region, switch region from the console menu, confirm the compartment follows; plus persistence and the no-pin path | stdout |
 | `scripts/region-trace.js` | `snap <label>` / `diff <a> <b>` — snapshots cookies + localStorage + sessionStorage + `duplo` and diffs; used to prove the active region is in storage, never a cookie | `scripts/region-<label>.json` |
 | `scripts/comp-v2.js` | Tests pin icons, drag-reorder, the settings modal and region-follows-compartment | stdout |
 | `scripts/comp-func.js` | End-to-end test: render → fuzzy search → pin → alias → search-by-alias → select | stdout |

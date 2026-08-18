@@ -31,6 +31,13 @@
   const MENU = '.oj-oci-filter-menu--form-container';
   const COMPARTMENT_MARKER = '.oj-oci-compartment-filter-control--compartment-select-container';
   const ROOT_ID = 'oxconnect-compartment-picker';
+  // Region → compartment pins live in localStorage so the region-menu click handler can read
+  // them SYNCHRONOUSLY (see installRegionHook — the decision has to be made before the click
+  // is allowed to proceed, which rules out chrome.storage).
+  const RP_PREFIX = 'oxc.rp.';          // + base64("<tenant>:<region>")  →  obfuscated OCID
+  const RP_REGIONS = 'oxc.regions';     // cached [{name,label}] for label → region-name lookup
+  const RP_MIRROR = 'compartmentRegionPins';   // durable mirror in chrome.storage.local
+  const TENANT_WAIT_MS = 45 * 1000;
 
   const state = { adv: null, tenant: null, comps: null, prefs: { pinned: [], aliases: {}, settings: {} } };
 
@@ -61,12 +68,41 @@
 
   // `duplo` holds one set of stores PER TENANCY — and because oxconnect deliberately keeps
   // that database across a tenant switch (see clearConsoleIdbExceptPrefs in background.js),
-  // several tenancies' caches coexist. Picking the first one shows the wrong compartments,
-  // so the active tenancy has to be identified:
-  //   1. the tenancy whose stored `activeCompartmentId` resolves to the compartment the
-  //      filter chip is currently showing — exact, and true however the user signed in;
-  //   2. failing that, the tenancy with the newest `lastUserActivity`.
-  async function loadFromCache(activeName) {
+  // several tenancies' caches coexist. Picking the wrong one shows the wrong compartments AND
+  // the wrong pins, so the active tenancy is resolved by `activeTenantName()` below.
+  // Which tenancy is the console actually signed in to?
+  //
+  // NOT by compartment name: compartment names are NOT unique across tenancies (two tenancies
+  // here both have an `ap01.dev.us-ashburn-1`), so matching the filter chip's label against
+  // each tenancy's cache picks whichever store is iterated first — measured, and it showed one
+  // tenancy's compartments while the other was signed in.
+  //
+  // The console states it outright in the TOP frame: the profile menu links carry
+  // `?tenant=<tenantName>`. Falling back to the extension's own record of the last switch, and
+  // finally to whichever tenancy the console touched most recently.
+  function domTenantName() {
+    try {
+      for (const a of topDoc().querySelectorAll('a[href*="tenant="]')) {
+        const t = new URL(a.getAttribute('href'), location.origin).searchParams.get('tenant');
+        if (t) return t;
+      }
+    } catch { /* cross-origin or malformed href */ }
+    return null;
+  }
+  // `waitMs` matters at page load: those profile-menu links are painted late, and without
+  // waiting the resolver silently falls through to the wrong tenancy (measured — the region
+  // hook armed itself against the previously-signed-in tenancy's regions and never matched).
+  async function activeTenantName(waitMs = 0) {
+    const t = waitMs ? await until(domTenantName, waitMs) : domTenantName();
+    if (t) return t;
+    try {
+      const { activeTarget } = await chrome.storage.local.get('activeTarget');
+      if (activeTarget) return String(activeTarget).split('|')[0];
+    } catch {}
+    return null;
+  }
+
+  async function loadFromCache(tenantWaitMs = 0) {
     let db;
     try { db = await idbOpen('duplo'); } catch { return null; }
     try {
@@ -102,13 +138,20 @@
       for (const t of tenants) {
         if (db.objectStoreNames.contains(t.prefs)) subs.set(t.prefs, await get(t.prefs, 'subscribed-regions'));
       }
+      // Region friendly labels are global OCI names, not tenancy-specific, so pool them all —
+      // that keeps "UK South (London)" → uk-london-1 resolvable even if the tenancy resolution
+      // above ever picks wrong.
+      const allRegions = new Map();
+      for (const raw of subs.values())
+        for (const r of (parse(raw)?.data || [])) if (r.displayName) allRegions.set(r.displayName, { id: r.id, name: r.displayName, label: r.friendlyName });
+
+      const wanted = await activeTenantName(tenantWaitMs);
 
       let best = null;
       for (const t of tenants) {
         const comps = await compsOf(t);
         if (!comps.length) continue;
         const hasPrefs = db.objectStoreNames.contains(t.prefs);
-        const activeId = hasPrefs ? await get(t.prefs, 'activeCompartmentId') : null;
         const activity = Number(hasPrefs ? (await get(t.prefs, 'lastUserActivity')) || 0 : 0);
         // The tenancy's own subscribed-region list — the right menu to offer, since a
         // tenancy can only be used in the regions it is subscribed to.
@@ -120,11 +163,12 @@
               .filter((r) => r.name);
           } catch { return []; }
         })();
-        // (1) exact: this tenancy's remembered compartment is the one on the chip
-        if (activeName && activeId && comps.some((c) => c.id === activeId && c.name === activeName))
-          return { tenant: t.tenant, comps, regions, matchedBy: 'activeCompartment' };
-        // (2) fallback candidate
-        if (!best || activity > best.activity) best = { tenant: t.tenant, comps, regions, activity, matchedBy: 'lastActivity' };
+        // (1) the console itself names the signed-in tenancy
+        if (wanted && t.tenant === wanted)
+          return { tenant: t.tenant, comps, regions, allRegions: [...allRegions.values()], matchedBy: 'tenantName' };
+        // (2) fallback: whichever tenancy the console touched most recently
+        if (!best || activity > best.activity)
+          best = { tenant: t.tenant, comps, regions, allRegions: [...allRegions.values()], activity, matchedBy: 'lastActivity' };
       }
       return best;
     } finally { db.close(); }
@@ -184,55 +228,168 @@
 
   // ---- region ---------------------------------------------------------------
   //
-  // Where the console keeps the active region (traced by diffing all storage across a region
-  // switch — see scripts/region-trace.js). NO cookie is involved, which is why deleting the
-  // `?region=` query param just gets it re-added:
-  //   sessionStorage.region          "us-ashburn-1"   (region NAME, per tab)
-  //   sessionStorage.activeRegionId  "IAD"            (region KEY, per tab)
-  //   duplo <tenantName>/<userOcid> → activeRegionId  "IAD"  (durable, survives reloads)
-  // plus lazily-built per-region caches (`capability/<tenancyOcid>::<region>`, …).
+  // Established by experiment (scripts/comp-storage-probe*.js, scripts/region-nav-probe.js):
   //
-  // Writing those by hand would leave the SPA's in-memory state stale, so — exactly as with
-  // compartment selection — we drive the console's own region menu instead. That menu lives
-  // in the TOP frame, not the sandbox iframe this script's picker code runs in; both are
-  // cloud.oracle.com, so the top document is reachable.
+  //  • The active compartment is just persisted state — `sessionStorage.activeCompartmentId`
+  //    plus `duplo <tenantName>/<userOcid> → activeCompartmentId`. Writing both and loading
+  //    the page is authoritative: the console adopts the compartment with no picker involved.
+  //  • `?compartmentId=<ocid>` on any console URL is equally authoritative, and applies on the
+  //    same load as `?region=`.
+  //  • Switching region from the console's region menu is an **SPA route change, not a
+  //    document load** (verified: a marker on `window` survives it). So the SPA keeps its
+  //    in-memory compartment and never re-reads storage — writing the pin's compartment and
+  //    letting the click proceed cannot work.
+  //
+  // Hence: intercept the region click and do ONE real navigation carrying both parameters.
+  // The compartment picker is never touched.
+
+  function topWin() { try { return window.top || window; } catch { return window; } }
   function topDoc() {
     try { if (window.top && window.top.document) return window.top.document; } catch { /* cross-origin */ }
     return document;
   }
   function currentRegionName() {
     try { const r = sessionStorage.getItem('region'); if (r) return r; } catch {}
-    try { return new URL(window.top.location.href).searchParams.get('region') || ''; } catch { return ''; }
+    try { return new URL(topWin().location.href).searchParams.get('region') || ''; } catch { return ''; }
   }
 
-  // The extension's Discovery region doubles as the console default (the user's choice).
+  // ---- pin store (localStorage, lightly obfuscated) --------------------------
+  //
+  // One entry per (tenancy, region), so pinning a second compartment to a region simply
+  // replaces the entry and the region always resolves to the most recently pinned compartment.
+  // The obfuscation is exactly that — obfuscation, not encryption: it only keeps tenancy and
+  // compartment OCIDs from sitting in cleartext in a shared origin's localStorage. Anyone with
+  // the code can reverse it, and it is not a security control.
+  const OBF = 'oxconnect';
+  const xor = (str) => str.split('').map((ch, i) => String.fromCharCode(ch.charCodeAt(0) ^ OBF.charCodeAt(i % OBF.length))).join('');
+  const enc = (v) => { try { return btoa(xor(v)); } catch { return ''; } };
+  const dec = (v) => { try { return xor(atob(v)); } catch { return ''; } };
+  // The KEY is obfuscated too, so tenancy names are not sitting in cleartext either. It stays
+  // deterministic (same input → same key), which is all the lookup needs.
+  const rpKey = (tenant, region) => RP_PREFIX + enc(`${tenant}:${region}`).replace(/[^A-Za-z0-9]/g, (ch) => `_${ch.charCodeAt(0)}_`);
+
+  function rpGet(tenant, region) {
+    try { const raw = localStorage.getItem(rpKey(tenant, region)); return raw ? dec(raw) : ''; } catch { return ''; }
+  }
+  function rpSet(tenant, region, compartmentId) {
+    try {
+      if (compartmentId) localStorage.setItem(rpKey(tenant, region), enc(compartmentId));
+      else localStorage.removeItem(rpKey(tenant, region));
+    } catch {}
+    // Mirror durably: this origin's localStorage is wiped by the extension's own tenant switch
+    // (clearOracleSession), which would otherwise take every pin with it.
+    chrome.storage.local.get(RP_MIRROR).then(({ [RP_MIRROR]: m }) => {
+      const all = m || {};
+      if (compartmentId) all[`${tenant}:${region}`] = compartmentId; else delete all[`${tenant}:${region}`];
+      chrome.storage.local.set({ [RP_MIRROR]: all });
+    }).catch(() => {});
+  }
+  // Put the mirror back after a tenant switch has cleared this origin's localStorage.
+  async function rehydratePins() {
+    const { [RP_MIRROR]: m } = await chrome.storage.local.get(RP_MIRROR);
+    for (const [k, id] of Object.entries(m || {})) {
+      const i = k.lastIndexOf(':');
+      const tenant = k.slice(0, i), region = k.slice(i + 1);
+      try { if (!localStorage.getItem(rpKey(tenant, region))) localStorage.setItem(rpKey(tenant, region), enc(id)); } catch {}
+    }
+  }
+
+  // The click handler must map "UK South (London)" → uk-london-1 synchronously, so the region
+  // list is cached here rather than read from IndexedDB on demand.
+  function cacheRegions(regions) {
+    try { localStorage.setItem(RP_REGIONS, JSON.stringify((regions || []).map((r) => ({ name: r.name, label: r.label })))); } catch {}
+  }
+  function cachedRegions() {
+    try { return JSON.parse(localStorage.getItem(RP_REGIONS) || '[]'); } catch { return []; }
+  }
+  function regionFromMenuText(text, regions) {
+    const t = (text || '').replace(/\s+/g, ' ').trim();     // "Home region US East (Ashburn)"
+    const byLabel = regions.find((r) => r.label && t.includes(r.label));
+    return byLabel ? byLabel.name : (regions.find((r) => t.includes(r.name)) || {}).name || '';
+  }
+  function tenantFromDom() {
+    try {
+      for (const a of topDoc().querySelectorAll('a[href*="tenant="]')) {
+        const t = new URL(a.getAttribute('href'), location.origin).searchParams.get('tenant');
+        if (t) return t;
+      }
+    } catch {}
+    return null;
+  }
+
+  // The extension's Discovery region doubles as the console default (the user's own choice).
   async function defaultRegion() {
     const { settings } = await chrome.storage.local.get('settings');
     return (settings && settings.discoveryRegion) || 'us-ashburn-1';
   }
 
-  async function applyRegion(regionName, regions) {
-    if (!regionName || currentRegionName() === regionName) return true;
-    const doc = topDoc();
-    const btn = doc.getElementById('region-menu-button');
-    if (!btn) return false;
-    // The friendly label ("Germany Central (Frankfurt)") is what the menu renders; fall back to
-    // the raw region name in case the tenancy's subscribed-region list did not have a label.
-    const label = (regions.find((r) => r.name === regionName) || {}).label || regionName;
-    const items = () => [...doc.querySelectorAll('.region-selector a.dropmenu__option-item')];
-    const find = () => items().find((e) => (e.innerText || '').includes(label))
-                    || items().find((e) => (e.innerText || '').includes(regionName));
-    // The menu's anchors stay in the DOM while it is closed, so only open it when they are
-    // not actually laid out (`offsetParent === null`) — clicking the button blindly would
-    // toggle an already-open menu shut.
-    let hit = find();
-    if (!hit || hit.offsetParent === null) {
-      btn.click();
-      hit = await until(() => { const h = find(); return h && h.offsetParent !== null ? h : null; }, 4000);
+  // Navigate the whole tab.
+  //
+  // The compartment picker runs inside the console's SANDBOXED `sandbox-maui-preact-container`
+  // iframe, and a sandboxed frame is not allowed to navigate its top frame — `top.location
+  // .assign()` throws "The current window does not have permission to navigate the target
+  // frame". (Reading `top.location` is fine; only navigation is blocked.) So from a subframe we
+  // ask the service worker to drive the tab. The region hook runs in the top frame, where the
+  // direct call works.
+  async function navigateTop(url) {
+    if (window.top === window) { window.location.assign(url); return; }
+    try {
+      await chrome.runtime.sendMessage({ type: 'navigateTab', url });
+    } catch {
+      try { topWin().location.assign(url); } catch {}
     }
-    if (!hit) { if (find()) btn.click(); return false; }   // not subscribed — leave the menu as we found it
-    hit.click();
-    return true;
+  }
+
+  // Build the console URL that applies a region and/or a compartment in one load.
+  function consoleUrl({ region, compartmentId }) {
+    const u = new URL(topWin().location.href);
+    u.hash = '';
+    if (region) u.searchParams.set('region', region);
+    if (compartmentId) u.searchParams.set('compartmentId', compartmentId);
+    else u.searchParams.delete('compartmentId');
+    return u.toString();
+  }
+
+  // Write the console's own compartment state, so it stays correct after the load too (the
+  // URL param alone would be dropped the next time the SPA rewrites the URL).
+  async function writeActiveCompartment(tenant, compartmentId) {
+    try { sessionStorage.setItem('activeCompartmentId', compartmentId); } catch {}
+    let db;
+    try { db = await idbOpen('duplo'); } catch { return; }
+    try {
+      // the prefs store is `<tenantName>/<userOcid>` (plain startsWith — the tenancy name is
+      // user data and must not be spliced into a RegExp)
+      const store = [...db.objectStoreNames].find((s2) => s2.startsWith(`${tenant}/ocid1.user`));
+      if (!store) return;
+      await new Promise((r) => {
+        const tx = db.transaction(store, 'readwrite');
+        tx.objectStore(store).put(compartmentId, 'activeCompartmentId');
+        tx.oncomplete = tx.onerror = () => r();
+      });
+    } catch {} finally { db.close(); }
+  }
+
+  // ---- the region hook -------------------------------------------------------
+  // Runs in the top frame only (that is where the region menu lives). Everything the decision
+  // needs is synchronous, so `preventDefault` can be called before any await — an async
+  // handler here resolves only after the SPA has already started routing.
+  function installRegionHook() {
+    if (window.top !== window) return;
+    topDoc().addEventListener('click', (e) => {
+      const item = e.target && e.target.closest && e.target.closest('.region-selector a.dropmenu__option-item');
+      if (!item) return;
+      const tenant = tenantFromDom();
+      if (!tenant) return;
+      const region = regionFromMenuText(item.innerText, cachedRegions());
+      if (!region || region === currentRegionName()) return;
+      const compartmentId = rpGet(tenant, region);
+      if (!compartmentId) return;                       // no pin for this region — let the console do its thing
+
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      writeActiveCompartment(tenant, compartmentId);    // fire and forget; the URL param carries it regardless
+      topWin().location.assign(consoleUrl({ region, compartmentId }));
+    }, true);
   }
 
   // ---- UI ------------------------------------------------------------------
@@ -256,9 +413,14 @@
     .list { overflow-y:auto; border:1px solid #e0e0e0; border-radius:4px; }
     .hdr { padding:5px 10px; font-size:10px; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
            color:#5b5b5b; background:#f4f4f4; position:sticky; top:0; z-index:1; }
-    .row { display:flex; align-items:center; gap:8px; padding:6px 10px; cursor:pointer; border-bottom:1px solid #f2f2f2; }
+    .row { position:relative; display:flex; align-items:center; gap:8px; padding:6px 10px; cursor:pointer; border-bottom:1px solid #f2f2f2; }
     .row:hover, .row.cursor { background:#eaf3fb; }
+    /* The ACTIVE compartment must not read as "the keyboard cursor happens to be here", so it
+       gets an accent bar and a bolder name rather than only a slightly different tint. The bar
+       is a pseudo-element, not an inset box-shadow, because the drag-drop markers use those. */
     .row.active { background:#e2eefa; }
+    .row.active .name { font-weight:600; }
+    .row.active::before { content:''; position:absolute; left:0; top:0; bottom:0; width:3px; background:#0572ce; }
     .row .txt { flex:1; min-width:0; }
     .row .name { font-size:13px; line-height:1.25; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .row .sub  { font-size:11px; color:#6b6b6b; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -296,6 +458,7 @@
       .row { border-bottom-color:#3a3a3a; }
       .row:hover, .row.cursor { background:#3a4654; }
       .row.active { background:#334a63; }
+      .row.active::before { background:#4a9eea; }
       .row .sub { color:#a0a0a0; }
       .ico:hover { background:#44566b; }
       .ico.on:hover { background:#5a3f3a; }
@@ -351,7 +514,10 @@
     const list = wrap.querySelector('.list');
     list.style.maxHeight = state.adv.compartmentPickerMaxHeight + 'px';
 
-    let cursor = 0, rendered = [];
+    // `cursor` is where Enter would land. Painting it on open would highlight the first row
+    // for no reason — which reads as "this compartment is selected". It only becomes visible
+    // once there is a query (Enter picks the top hit) or the user has pressed an arrow key.
+    let cursor = 0, rendered = [], cursorVisible = false;
 
     function render() {
       const q = search.value.trim();
@@ -386,7 +552,8 @@
         const sub = it.alias ? it.c.name : ctx.pathOf(it.c);
         const region = (state.prefs.settings[it.c.id] || {}).region || '';
         const row = document.createElement('div');
-        row.className = 'row' + (it.pinned ? ' pinned' : '') + (idx === cursor ? ' cursor' : '')
+        row.className = 'row' + (it.pinned ? ' pinned' : '')
+                      + (cursorVisible && idx === cursor ? ' cursor' : '')
                       + (it.c.id === ctx.activeId ? ' active' : '');
         row.dataset.id = it.c.id;
         // Only pinned rows are draggable — the unpinned section is alphabetical, so there is
@@ -493,6 +660,10 @@
         if (alias && alias !== it.c.name) state.prefs.aliases[it.c.id] = alias; else delete state.prefs.aliases[it.c.id];
         if (region) state.prefs.settings[it.c.id] = { ...cur, region }; else delete state.prefs.settings[it.c.id];
         await savePrefs(ctx.tenant, state.prefs);
+        // Reverse index: region → compartment, one entry per region (a newer pin replaces it),
+        // which is what the region hook reads.
+        if (cur.region && cur.region !== region && rpGet(ctx.tenant, cur.region) === it.c.id) rpSet(ctx.tenant, cur.region, '');
+        if (region) rpSet(ctx.tenant, region, it.c.id);
         close(); render();
       });
       modal.addEventListener('keydown', (e) => {
@@ -505,7 +676,11 @@
 
     async function togglePin(id) {
       const i = state.prefs.pinned.indexOf(id);
-      if (i >= 0) { state.prefs.pinned.splice(i, 1); delete state.prefs.aliases[id]; delete state.prefs.settings[id]; }
+      if (i >= 0) {
+        const r = (state.prefs.settings[id] || {}).region;
+        if (r && rpGet(ctx.tenant, r) === id) rpSet(ctx.tenant, r, '');
+        state.prefs.pinned.splice(i, 1); delete state.prefs.aliases[id]; delete state.prefs.settings[id];
+      }
       else state.prefs.pinned.unshift(id);
       await savePrefs(ctx.tenant, state.prefs);
       render();
@@ -538,6 +713,25 @@
 
     async function choose(c) {
       search.disabled = true;
+
+      // Does this selection also need a region change? Normally ONLY when the chosen
+      // compartment itself carries a pinned region. Falling back to a default for every
+      // unpinned compartment means that, as soon as a single pin exists anywhere, an ordinary
+      // compartment click drags you out of whatever region you were working in — so that is
+      // off unless explicitly asked for.
+      const pinnedRegion = (state.prefs.settings[c.id] || {}).region || '';
+      const target = pinnedRegion || (state.adv.compartmentResetRegion ? await defaultRegion() : '');
+
+      if (target && target !== currentRegionName()) {
+        // One navigation applies both. Driving the tree first would only be undone by the
+        // reload, and driving the region menu afterwards is a second round-trip.
+        list.innerHTML = `<div class="empty">Switching to ${escapeHtml(target)}…</div>`;
+        await writeActiveCompartment(ctx.tenant, c.id);
+        await navigateTop(consoleUrl({ region: target, compartmentId: c.id }));
+        return;
+      }
+
+      // Same region: drive the console's own picker, which applies without a reload.
       list.innerHTML = '<div class="empty">Switching compartment…</div>';
       const ok = await selectCompartment(menu, c);
       if (!ok) {
@@ -546,28 +740,21 @@
         restoreNative(menu);
         return;
       }
-      // Region follows the compartment — but only for a tenancy where the user has actually
-      // pinned a region to at least one compartment. Otherwise selecting a compartment would
-      // start yanking the region around for people who never asked for the feature.
-      const pinnedRegion = (state.prefs.settings[c.id] || {}).region || '';
-      const anyRegionPinned = Object.values(state.prefs.settings).some((v) => v && v.region);
-      if (!pinnedRegion && !anyRegionPinned) return;
-      const target = pinnedRegion || await defaultRegion();
-      if (!target) return;
-      list.innerHTML = `<div class="empty">Switching region to ${escapeHtml(target)}…</div>`;
-      await applyRegion(target, ctx.regions);
+      void ok;
     }
 
-    search.addEventListener('input', () => { cursor = 0; render(); });
+    search.addEventListener('input', () => { cursor = 0; cursorVisible = !!search.value.trim(); render(); });
     search.addEventListener('keydown', (e) => {
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault();
-        cursor = Math.max(0, Math.min(rendered.length - 1, cursor + (e.key === 'ArrowDown' ? 1 : -1)));
+        // first arrow press just reveals the cursor where it already is
+        if (!cursorVisible) cursorVisible = true;
+        else cursor = Math.max(0, Math.min(rendered.length - 1, cursor + (e.key === 'ArrowDown' ? 1 : -1)));
         render();
         list.querySelector('.row.cursor')?.scrollIntoView({ block: 'nearest' });
       } else if (e.key === 'Enter') {
         e.preventDefault();
-        if (rendered[cursor]) choose(rendered[cursor].c);
+        if (cursorVisible && rendered[cursor]) choose(rendered[cursor].c);
       }
     });
 
@@ -610,7 +797,7 @@
     if (!menu.querySelector(COMPARTMENT_MARKER)) return;       // some other filter menu — leave it alone
 
     const activeName = activeCompartmentName();
-    const cached = await loadFromCache(activeName);
+    const cached = await loadFromCache(5000);
     const comps = cached?.comps?.length ? cached.comps : loadFromDom(menu);
     if (!comps.length) return;                                 // nothing to show — keep the native picker
     state.tenant = cached?.tenant || 'default';
@@ -624,6 +811,7 @@
       activeId: comps.find((c) => c.name === activeName)?.id || null,
     };
 
+    cacheRegions(ctx.regions);
     coverNative(menu);
     menu.append(buildPanel(menu, ctx));
   }
@@ -643,5 +831,12 @@
     };
     new MutationObserver(scan).observe(document.documentElement, { childList: true, subtree: true });
     scan();
+
+    if (state.adv.compartmentFollowsRegion && window.top === window) {
+      await rehydratePins();
+      installRegionHook();
+      // Keep the synchronous label → region-name cache fresh even if the picker is never opened.
+      loadFromCache(TENANT_WAIT_MS).then((c) => { if (c) cacheRegions(c.allRegions || c.regions); }).catch(() => {});
+    }
   })();
 })();

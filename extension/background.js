@@ -565,7 +565,7 @@ async function buildServiceCatalog() {
 }
 
 // ---- message router ------------------------------------------------------
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     try {
       if (msg.type === 'switch') sendResponse({ ok: true, result: await switchTo(msg.target, msg.openInNewTab) });
@@ -581,6 +581,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         sendResponse({ ok: true, catalog: serviceCatalog, region: prof?.region || (await discoveryRegion()) });
       }
       else if (msg.type === 'openService') { await openUrl(msg.url, msg.openInNewTab); sendResponse({ ok: true }); }
+      // The compartment picker lives in the console's SANDBOXED iframe, which browsers forbid
+      // from navigating their top frame ("The current window does not have permission to
+      // navigate the target frame"). So it asks us to drive its own tab instead. Restricted to
+      // console URLs so a compromised page can't use the extension as an open redirect.
+      else if (msg.type === 'navigateTab') {
+        if (!sender.tab?.id) throw new Error('no sender tab');
+        if (!/^https:\/\/cloud\.oracle\.com\//.test(String(msg.url || ''))) throw new Error('refusing non-console URL');
+        await chrome.tabs.update(sender.tab.id, { url: msg.url });
+        sendResponse({ ok: true });
+      }
       else sendResponse({ ok: false, error: 'unknown message type' });
     } catch (e) {
       sendResponse({ ok: false, error: e.message });
